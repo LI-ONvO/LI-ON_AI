@@ -1,0 +1,28 @@
+# --- 비밀 정보 (반드시 유지) ---
+.env
+.env.*
+!.env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- 가상환경 ---
+.venv/
+venv/
+env/
+
+# --- 에디터 ---
+.idea/
+.vscode/
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- 배치 진행 기록 ---
+batch/.schedule_progress_*.txt
