@@ -56,8 +56,18 @@ def _build_instruction(title: str | None) -> str:
 
 
 def _format_schedules(jm_nm: str, schedules: list[dict]) -> str:
-    """실제 시험일정을 프롬프트에 넣을 텍스트로 만든다."""
-    lines = [f"[{jm_nm} 실제 시험일정]"]
+    """실제 시험일정을 프롬프트에 넣을 텍스트로 만든다.
+
+    회차 안에서도 필기는 끝나고 실기만 남은 경우가 있다. 그대로 넘기면 모델이
+    "실기 접수 마감"을 고정점으로 잡아, 필기를 아직 안 본 학생에게 응시할 수 없는
+    일정을 만들어 준다. 그래서 회차를 어떻게 읽어야 하는지 함께 알려준다.
+    """
+    lines = [
+        f"[{jm_nm} 실제 시험일정]",
+        "필기 원서접수가 [종료]인 회차는 지금 새로 응시할 수 없습니다. "
+        "사용자가 이미 필기에 합격했다고 대화에서 밝힌 경우가 아니면, "
+        "필기 원서접수가 [예정]인 회차를 목표로 역산하세요.",
+    ]
     for schedule in schedules:
         lines.append(schedule["description"] or f"{schedule['implSeq']}회")
         for event in schedule["events"]:
@@ -78,7 +88,15 @@ async def _load_exam_context(jm_cd: str) -> str | None:
         logger.warning("종목코드 %s 를 찾지 못했습니다.", jm_cd)
         return None
 
-    schedules = await fetch_exam_schedules(jm_cd)
+    # 올해만 보면 연말에는 접수가 끝난 회차뿐이다. 실제로 9월 기준 2026년에 필기
+    # 원서접수가 남은 종목은 0개였다. 내년 일정까지 함께 넘겨야 역산할 고정점이 생긴다.
+    this_year = date.today().year
+    schedules: list[dict] = []
+    for year in (this_year, this_year + 1):
+        schedules.extend(await fetch_exam_schedules(jm_cd, year))
+
+    # 모든 일정이 지나간 회차는 로드맵의 근거가 되지 못하고 프롬프트만 늘린다.
+    schedules = [s for s in schedules if any(event["upcoming"] for event in s["events"])]
     if not schedules:
         return None
 

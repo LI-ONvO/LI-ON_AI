@@ -35,6 +35,18 @@ WJM_URL = "https://c.q-net.or.kr/openapi/wjmlist.do"
 CJM_URL = "https://c.q-net.or.kr/openapi/cjmlist.do"
 # 시험일정
 EXAM_SCHD_URL = "http://apis.data.go.kr/B490007/qualExamSchd/getQualExamSchdList"
+# 연도별·회차별 합격률
+PASS_RATE_URL = "http://openapi.q-net.or.kr/api/service/rest/InquiryQualPassRateSVC/getList"
+# 응시수수료
+FEE_URL = "http://openapi.q-net.or.kr/api/service/rest/InquiryTestInformationNTQSVC/getFeeList"
+
+# 수수료가 있는 자격구분. W(일학습병행)·C(과정평가형)는 검정형이 아니라 응시료 개념이 없다.
+FEE_QUAL_GB_CDS = ("T", "S")
+
+# 합격률 API의 등급코드. 등급 단위로만 조회할 수 있어 종목별 호출이 필요 없다.
+# 포털 안내문에는 "40 산업기사, 50 기능사"로 적혀 있으나 실제 응답은 다르다.
+# 코드를 00~99까지 훑어 확인한 결과가 아래다(50은 어느 해든 0건).
+PASS_RATE_GRADES = ("10", "20", "30", "31", "32", "33", "40")
 
 # 이 API는 한 페이지 50건을 넘기면 resultCode 930으로 거절한다.
 SCHEDULE_PAGE_SIZE = 50
@@ -45,6 +57,13 @@ SERIES_CODES = ("01", "02", "03", "04")
 CERT_FIELDS = ["jm_cd", "jm_nm", "qual_gb_cd", "series_nm"]
 
 DETAIL_FIELDS = ["jm_cd", "mdoblig_fld_nm", "career", "job", "summary", "trend", "hist"]
+
+FEE_FIELDS = ["jm_cd", "fee_1", "fee_2", "fee_3"]
+
+# 전체 배치에서 합격률을 몇 년치 받을지. 더 필요하면 batch.sync_pass_rates 에 범위를 준다.
+PASS_RATE_YEARS = 5
+
+PASS_RATE_FIELDS = ["jm_cd", "impl_yy", "impl_seq", "exam_typ", "recpt_no_cnt", "exam_pass_cnt"]
 
 SCHEDULE_FIELDS = [
     "jm_cd", "impl_yy", "impl_seq", "doc_reg_start_dt", "description",
@@ -320,6 +339,107 @@ def sync_exam_schedules(conn, year: int) -> int:
     return saved
 
 
+# --------------------------------------------------------------------- 합격률
+
+def _to_int(value: str | None) -> int | None:
+    if not value or not value.strip().isdigit():
+        return None
+    return int(value)
+
+
+def fetch_pass_rates(year: int) -> list[dict]:
+    """한 해의 합격률을 등급별로 모아 온다.
+
+    한 등급이 많아야 1,600건이라 페이지를 나눌 필요가 없다. 넉넉한 numOfRows로
+    한 번에 받는다(시험일정 API와 달리 이쪽은 큰 값을 거절하지 않는다).
+
+    응답에 jmCd가 들어 있어 종목명으로 맞춰볼 필요 없이 그대로 이어붙일 수 있다.
+    (포털 문서의 출력 목록에는 jmCd가 빠져 있지만 실제로는 내려온다.)
+    """
+    rows: list[dict] = []
+    for grade in PASS_RATE_GRADES:
+        try:
+            root = _fetch(
+                PASS_RATE_URL,
+                {"grdCd": grade, "baseYY": str(year), "numOfRows": "2000", "pageNo": "1"},
+                "item",
+                f"합격률({year}/{grade})",
+            )
+        except RuntimeError:
+            # 그 해에 해당 등급 데이터가 없으면 item 자체가 없다. 오류가 아니다.
+            continue
+
+        for item in root.findall(".//item"):
+            jm_cd = _text(item, "jmCd")
+            exam_typ = _text(item, "examTypCcd")
+            if not jm_cd or not exam_typ:
+                continue
+            rows.append(
+                _row(
+                    PASS_RATE_FIELDS,
+                    jm_cd=jm_cd,
+                    impl_yy=year,
+                    impl_seq=_text(item, "implSeq") or "",
+                    exam_typ=exam_typ,
+                    recpt_no_cnt=_to_int(_text(item, "recptNoCnt")),
+                    exam_pass_cnt=_to_int(_text(item, "examPassCnt")),
+                )
+            )
+    return rows
+
+
+# ------------------------------------------------------------------- 응시수수료
+
+# "1차 : 19400, 2차 : 22600" 에서 (차수, 금액)을 뽑는다.
+# 1차가 없어 ", 2차 : 41500"으로 시작하거나 3차까지 있는 종목도 있어, 통째로 파싱하지 않고
+# 차수별로 골라 담는다.
+_FEE_PART = re.compile(r"(\d)\s*차\s*:\s*(\d+)")
+
+
+def _parse_fee(contents: str | None) -> dict:
+    fees = {f"fee_{n}": None for n in (1, 2, 3)}
+    for seq, amount in _FEE_PART.findall(contents or ""):
+        if seq in ("1", "2", "3"):
+            fees[f"fee_{seq}"] = int(amount)
+    return fees
+
+
+def sync_exam_fees(conn) -> int:
+    """종목마다 응시수수료를 조회해 저장한다.
+
+    jmCd가 필수라 종목 단위로 불러야 하지만, 한 번에 0.1초대라 613종목이면 1분 남짓이다.
+    시험일정과 달리 체크포인트가 필요할 만큼 길지 않다.
+
+    수수료는 등급으로 묶을 수 없다. 1차(필기)는 등급마다 고정이지만 2차(실기)는 종목마다
+    다르다(같은 기사인데 22,600 / 43,400 / 56,300).
+    """
+    placeholders = ", ".join(["%s"] * len(FEE_QUAL_GB_CDS))
+    with conn.cursor() as cursor:
+        cursor.execute(
+            f"SELECT jm_cd FROM certification WHERE qual_gb_cd IN ({placeholders}) ORDER BY jm_cd",
+            list(FEE_QUAL_GB_CDS),
+        )
+        jm_cds = [row["jm_cd"] for row in cursor.fetchall()]
+
+    rows = []
+    missing = 0
+    for jm_cd in jm_cds:
+        try:
+            root = _fetch(FEE_URL, {"jmCd": jm_cd}, "item", f"응시수수료({jm_cd})", retries=3)
+        except RuntimeError:
+            # 폐지된 종목 등은 item 없이 빈 응답이 온다. 오류가 아니다.
+            missing += 1
+            continue
+
+        item = root.find(".//item")
+        contents = _text(item, "contents") if item is not None else None
+        rows.append(_row(FEE_FIELDS, jm_cd=jm_cd, **_parse_fee(contents)))
+
+    if missing:
+        print(f"  수수료 정보 없는 종목 {missing}건")
+    return upsert(conn, "exam_fee", FEE_FIELDS, rows, ["jm_cd"])
+
+
 # ------------------------------------------------------------------------- DB
 
 def connect():
@@ -380,6 +500,18 @@ def main() -> None:
         print("상세 설명 수집...")
         details = fetch_qual_details()
         print(f"  {upsert(conn, 'qual_detail', DETAIL_FIELDS, details, ['jm_cd'])}건 저장")
+
+        print("응시수수료 수집...")
+        print(f"  {sync_exam_fees(conn)}건 저장")
+
+        # 합격률은 등급 단위로만 조회되므로 한 해에 요청 7번이면 끝난다.
+        print("합격률 수집...")
+        rates = 0
+        for target_year in range(year - PASS_RATE_YEARS + 1, year + 1):
+            rows = fetch_pass_rates(target_year)
+            rates += upsert(conn, "pass_rate", PASS_RATE_FIELDS, rows,
+                            ["jm_cd", "impl_yy", "impl_seq", "exam_typ"])
+        print(f"  {rates}건 저장")
 
         # 연말에는 다음 해 일정이 먼저 올라오므로 두 해를 함께 받는다.
         # 종목마다 호출해야 해서 가장 오래 걸리는 단계다.

@@ -1,9 +1,11 @@
 """자격증 조회.
 
-배치가 채워둔 세 테이블을 읽는다.
-  certifications   전체 자격증 목록 (국가기술/국가전문/과정평가형/일학습병행)
-  qual_details     국가기술자격 상세 설명 (진로·수행직무·개요·출제경향·변천과정)
-  exam_schedules   회차별 시험일정
+배치가 채워둔 네 테이블을 읽는다.
+  certification   전체 자격증 목록 (국가기술/국가전문/과정평가형/일학습병행)
+  qual_detail     국가기술자격 상세 설명 (진로·수행직무·개요·출제경향·변천과정)
+  exam_schedule   회차별 시험일정
+  pass_rate       연도별·회차별 합격률
+  exam_fee        응시수수료
 
 챗봇이 없는 자격증을 지어내지 않도록, 추천·설명은 반드시 여기를 거친다.
 """
@@ -294,3 +296,76 @@ async def fetch_exam_schedules(jm_cd: str, year: int | None = None) -> list[dict
         })
 
     return schedules
+
+
+# 챗봇이 "합격률 어때?"에 답할 때 최근 몇 년을 보여줄지.
+# 너무 길면 프롬프트만 늘어나고, 오래된 회차는 난이도 참고로 쓸모가 적다.
+DEFAULT_PASS_RATE_YEARS = 5
+
+
+async def fetch_pass_rates(jm_cd: str, years: int = DEFAULT_PASS_RATE_YEARS) -> list[dict]:
+    """해당 종목의 연도별 필기/실기 합격률을 최근 연도부터 반환한다.
+
+    한 해에 회차가 여럿이라(기능사는 상시시험까지 있어 40회를 넘기도 한다) 회차를 그대로
+    넘기면 수십 줄이 된다. 연도·시험구분으로 묶어서 준다.
+
+    합격률은 회차별 퍼센트를 평균내지 않고 응시자수로 가중해 다시 계산한다.
+    응시자 7명인 회차와 2,000명인 회차를 같은 무게로 평균내면 실제와 크게 어긋난다.
+
+    빈 목록은 "합격률이 공개되지 않은 종목"을 뜻하며 오류가 아니다.
+    국가전문자격·과정평가형 등은 이 통계에 포함되지 않는다.
+    """
+    rows = await fetch_all(
+        """
+        SELECT impl_yy, exam_typ,
+               SUM(recpt_no_cnt) AS takers,
+               SUM(exam_pass_cnt) AS passers,
+               COUNT(*) AS rounds
+        FROM pass_rate
+        WHERE jm_cd = %s AND impl_yy >= %s
+        GROUP BY impl_yy, exam_typ
+        ORDER BY impl_yy DESC, exam_typ
+        """,
+        [jm_cd, date.today().year - years + 1],
+    )
+
+    results = []
+    for row in rows:
+        takers = row["takers"] or 0
+        passers = row["passers"] or 0
+        results.append({
+            "year": row["impl_yy"],
+            "examType": row["exam_typ"],
+            "takers": takers,
+            "passers": passers,
+            "passRate": round(passers / takers * 100, 1) if takers else None,
+            "rounds": row["rounds"],
+        })
+    return results
+
+
+# 필기/실기는 자격구분에 따라 부르는 이름이 다르다(기술사는 필기/면접).
+# 원문이 "1차/2차"로만 오므로 그대로 차수로 부른다.
+_FEE_LABELS = {"fee_1": "1차(필기)", "fee_2": "2차(실기)", "fee_3": "3차"}
+
+
+async def fetch_exam_fee(jm_cd: str) -> dict | None:
+    """응시수수료를 반환한다. 없으면 None.
+
+    검정형(국가기술·국가전문)에만 있다. 일학습병행·과정평가형은 응시료 개념이 없어
+    None이 정상이다.
+    """
+    rows = await fetch_all(
+        "SELECT fee_1, fee_2, fee_3 FROM exam_fee WHERE jm_cd = %s",
+        [jm_cd],
+    )
+    if not rows:
+        return None
+
+    row = rows[0]
+    fees = [
+        {"stage": _FEE_LABELS[key], "won": row[key]}
+        for key in ("fee_1", "fee_2", "fee_3")
+        if row[key] is not None
+    ]
+    return {"fees": fees} if fees else None

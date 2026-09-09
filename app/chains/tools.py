@@ -11,7 +11,9 @@ from datetime import date
 
 from app.core.logging import get_logger
 from app.repositories.certifications import (
+    fetch_exam_fee,
     fetch_exam_schedules,
+    fetch_pass_rates,
     resolve_certification,
     search_certifications,
 )
@@ -60,6 +62,47 @@ TOOL_SPECS = [
                         "description": "자격증 종목명 또는 종목코드 (예: '정보처리기사' 또는 '1320')",
                     },
                     "year": {"type": "integer", "description": "시행년도. 생략하면 올해."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_pass_rate",
+            "description": (
+                "자격증의 최근 연도별 필기·실기 합격률과 응시자수를 조회한다. "
+                "난이도나 합격 가능성을 물을 때 쓴다. "
+                "국가기술자격만 통계가 있고 국가전문자격·과정평가형에는 없다."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "자격증 종목명 또는 종목코드 (예: '정보처리기사' 또는 '1320')",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_exam_fee",
+            "description": (
+                "자격증의 응시수수료(원)를 조회한다. 검정형인 국가기술자격·국가전문자격에만 있고 "
+                "일학습병행·과정평가형에는 없다."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "자격증 종목명 또는 종목코드 (예: '정보처리기사' 또는 '1320')",
+                    },
                 },
                 "required": ["query"],
             },
@@ -123,6 +166,76 @@ async def _schedule_tool(query: str, year: int | None) -> dict:
     return payload
 
 
+async def _pass_rate_tool(query: str) -> dict:
+    """일정 도구와 같은 방식으로 종목을 특정한 뒤 합격률을 붙인다."""
+    resolved = await resolve_certification(query)
+    matches, total = resolved["matches"], resolved["total"]
+
+    if not matches:
+        return {"error": f"'{query}'에 해당하는 자격증을 찾지 못했습니다."}
+
+    if total > MAX_AUTO_FETCH:
+        return {
+            "ambiguous": True,
+            "total": total,
+            "note": (
+                f"'{query}'로 검색된 자격증이 {total}개입니다. "
+                "사용자에게 어느 것인지 되물어보세요."
+            ),
+            "candidates": matches[:10],
+        }
+
+    results = []
+    for target in matches:
+        entry = dict(target)
+        entry["passRates"] = await fetch_pass_rates(target["jmCd"])
+        if not entry["passRates"]:
+            entry["note"] = "이 자격증은 합격률 통계가 공개되지 않았습니다."
+        results.append(entry)
+
+    return {
+        "results": results,
+        "note": (
+            "passRate는 그 해 전체 회차를 응시자수로 가중해 계산한 값입니다(단위 %). "
+            "합격률이 낮다고 무조건 응시를 말리지 말고, 난이도 참고로만 설명하세요."
+        ),
+    }
+
+
+async def _fee_tool(query: str) -> dict:
+    resolved = await resolve_certification(query)
+    matches, total = resolved["matches"], resolved["total"]
+
+    if not matches:
+        return {"error": f"'{query}'에 해당하는 자격증을 찾지 못했습니다."}
+
+    if total > MAX_AUTO_FETCH:
+        return {
+            "ambiguous": True,
+            "total": total,
+            "note": (
+                f"'{query}'로 검색된 자격증이 {total}개입니다. "
+                "사용자에게 어느 것인지 되물어보세요."
+            ),
+            "candidates": matches[:10],
+        }
+
+    results = []
+    for target in matches:
+        entry = dict(target)
+        fee = await fetch_exam_fee(target["jmCd"])
+        if fee:
+            entry["fee"] = fee["fees"]
+        else:
+            entry["note"] = "이 자격증은 응시수수료 정보가 없습니다."
+        results.append(entry)
+
+    return {
+        "results": results,
+        "note": "금액 단위는 원입니다. 수수료는 바뀔 수 있으니 최종 금액은 큐넷 확인을 권하세요.",
+    }
+
+
 async def run_tool(name: str, arguments: str) -> str:
     """모델이 요청한 도구를 실행하고 결과를 JSON 문자열로 돌려준다."""
     try:
@@ -136,6 +249,10 @@ async def run_tool(name: str, arguments: str) -> str:
         payload = await _search_tool(args.get("keywords", []))
     elif name == "get_exam_schedule":
         payload = await _schedule_tool(args.get("query", ""), args.get("year"))
+    elif name == "get_pass_rate":
+        payload = await _pass_rate_tool(args.get("query", ""))
+    elif name == "get_exam_fee":
+        payload = await _fee_tool(args.get("query", ""))
     else:
         payload = {"error": f"알 수 없는 도구: {name}"}
 

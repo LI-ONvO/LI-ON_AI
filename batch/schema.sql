@@ -6,7 +6,7 @@
 -- 전체 자격증 목록 (약 3,700건)
 -- 이름 검색이 LIKE '%키워드%' 라 인덱스를 타지 못하고, 3,700행이면 전체를 훑어도 빠르므로
 -- 별도 인덱스를 두지 않는다.
-CREATE TABLE IF NOT EXISTS certifications (
+CREATE TABLE IF NOT EXISTS certification (
     jm_cd      VARCHAR(10)  PRIMARY KEY,  -- 종목코드
     jm_nm      VARCHAR(200) NOT NULL,     -- 종목명
     qual_gb_cd VARCHAR(2),                -- 자격구분 T:국가기술 S:국가전문 W:일학습병행 C:과정평가형
@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS certifications (
 ) DEFAULT CHARSET=utf8mb4;
 
 -- 국가기술자격 상세 설명 (약 490건). 챗봇이 추천 이유를 설명할 때 쓴다.
-CREATE TABLE IF NOT EXISTS qual_details (
+CREATE TABLE IF NOT EXISTS qual_detail (
     jm_cd          VARCHAR(10) PRIMARY KEY,
     mdoblig_fld_nm VARCHAR(200),  -- 직종
     career         TEXT,          -- 진로 및 전망
@@ -39,8 +39,8 @@ CREATE TABLE IF NOT EXISTS qual_details (
 -- 그렇다고 UNIQUE 로만 두면 MySQL이 NULL을 서로 다른 값으로 봐서 중복 검사에 걸리지 않고,
 -- 배치를 돌릴 때마다 같은 일정이 새로 쌓인다.
 -- 그래서 실제 날짜 컬럼은 NULL을 허용하고, 중복 판정용 값(reg_key)을 따로 계산해서 PK에 넣는다.
-CREATE TABLE IF NOT EXISTS exam_schedules (
-    jm_cd              VARCHAR(10) NOT NULL,  -- 종목코드 (certifications.jm_cd)
+CREATE TABLE IF NOT EXISTS exam_schedule (
+    jm_cd              VARCHAR(10) NOT NULL,  -- 종목코드 (certification.jm_cd)
     impl_yy            SMALLINT    NOT NULL,  -- 시행년도
     impl_seq           VARCHAR(4)  NOT NULL,  -- 회차
     doc_reg_start_dt   DATE,                  -- 필기 원서접수 시작. 없으면 NULL
@@ -60,4 +60,31 @@ CREATE TABLE IF NOT EXISTS exam_schedules (
     prac_exam_end_dt   DATE,                  -- 실기 시험 종료
     prac_pass_dt       DATE,                  -- 실기 합격발표
     PRIMARY KEY (jm_cd, impl_yy, impl_seq, reg_key)
+) DEFAULT CHARSET=utf8mb4;
+
+-- 연도별·회차별 합격률. 종목코드로 certification 과 이어진다.
+-- 한 회차에 필기/실기 두 행이 생기므로 시험구분까지 키에 넣는다.
+--
+-- API가 주는 합격률(passRate)은 저장하지 않는다. 응시자수·합격자수로 결정되는 값이라
+-- 이행종속이 생기고(3NF 위반), 정정이 들어오면 두 값이 어긋날 수 있다.
+-- 게다가 API 값은 "43%"처럼 소수점을 버리거나 18.75를 18.8로 반올림해 원본보다 부정확하다.
+-- 조회할 때 SUM(합격자)/SUM(응시자)로 계산한다.
+CREATE TABLE IF NOT EXISTS pass_rate (
+    jm_cd         VARCHAR(10) NOT NULL,  -- 종목코드 (certification.jm_cd)
+    impl_yy       SMALLINT    NOT NULL,  -- 시행년도
+    impl_seq      VARCHAR(4)  NOT NULL,  -- 회차. 기능사 상시시험이 있어 세 자리까지 온다
+    exam_typ      VARCHAR(4)  NOT NULL,  -- 필기 / 실기
+    recpt_no_cnt  INT,                   -- 응시자수
+    exam_pass_cnt INT,                   -- 합격자수
+    PRIMARY KEY (jm_cd, impl_yy, impl_seq, exam_typ)
+) DEFAULT CHARSET=utf8mb4;
+
+-- 응시수수료. 검정형(국가기술·국가전문)에만 있다.
+-- 원문이 "1차 : 19400, 2차 : 22600" 형태로 오는데, 1차만 있거나 3차까지 있는 종목이 있어
+-- 차수별 컬럼으로 나눠 담는다. 613종목 전부 확인한 결과 차수·금액 외의 텍스트는 없다.
+CREATE TABLE IF NOT EXISTS exam_fee (
+    jm_cd VARCHAR(10) PRIMARY KEY,
+    fee_1 INT,
+    fee_2 INT,
+    fee_3 INT
 ) DEFAULT CHARSET=utf8mb4;
