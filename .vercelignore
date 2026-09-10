@@ -1,0 +1,15 @@
+# 키가 들어있다. 값은 Vercel 대시보드의 환경변수로 넣는다.
+.env
+.env.*
+!.env.example
+
+# 배포에 필요 없다. 배치는 내 노트북에서 돌린다.
+batch/
+tests/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+Dockerfile
+.dockerignore

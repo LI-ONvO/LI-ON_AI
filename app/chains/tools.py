@@ -13,7 +13,7 @@ from app.core.logging import get_logger
 from app.repositories.certifications import (
     fetch_exam_fee,
     fetch_exam_schedules,
-    fetch_pass_rates,
+    fetch_pass_rate,
     resolve_certification,
     search_certifications,
 )
@@ -72,7 +72,7 @@ TOOL_SPECS = [
         "function": {
             "name": "get_pass_rate",
             "description": (
-                "자격증의 최근 연도별 필기·실기 합격률과 응시자수를 조회한다. "
+                "자격증의 최근 필기·실기 합격률(%)을 조회한다. "
                 "난이도나 합격 가능성을 물을 때 쓴다. "
                 "국가기술자격만 통계가 있고 국가전문자격·과정평가형에는 없다."
             ),
@@ -188,15 +188,19 @@ async def _pass_rate_tool(query: str) -> dict:
     results = []
     for target in matches:
         entry = dict(target)
-        entry["passRates"] = await fetch_pass_rates(target["jmCd"])
-        if not entry["passRates"]:
+        rate = await fetch_pass_rate(target["jmCd"])
+        if rate:
+            entry["passRates"] = rate["passRates"]
+        else:
             entry["note"] = "이 자격증은 합격률 통계가 공개되지 않았습니다."
         results.append(entry)
 
     return {
         "results": results,
         "note": (
-            "passRate는 그 해 전체 회차를 응시자수로 가중해 계산한 값입니다(단위 %). "
+            "passRate는 가장 최근 연도의 전체 회차를 응시자수로 가중해 계산한 값입니다(단위 %). "
+            "특정 회차의 값이 아니고 연도별 추이도 제공하지 않으니, 몇 년도 수치냐고 물으면 "
+            "최근 자료라고만 답하세요. "
             "합격률이 낮다고 무조건 응시를 말리지 말고, 난이도 참고로만 설명하세요."
         ),
     }

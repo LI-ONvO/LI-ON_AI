@@ -58,12 +58,13 @@ CERT_FIELDS = ["jm_cd", "jm_nm", "qual_gb_cd", "series_nm"]
 
 DETAIL_FIELDS = ["jm_cd", "mdoblig_fld_nm", "career", "job", "summary", "trend", "hist"]
 
-FEE_FIELDS = ["jm_cd", "fee_1", "fee_2", "fee_3"]
+# 응시료·합격률은 certification 의 컬럼을 UPDATE 한다(별도 테이블을 두지 않는다).
+FEE_FIELDS = ["jm_cd", "doc_fee", "prac_fee"]
 
 # 전체 배치에서 합격률을 몇 년치 받을지. 더 필요하면 batch.sync_pass_rates 에 범위를 준다.
 PASS_RATE_YEARS = 5
 
-PASS_RATE_FIELDS = ["jm_cd", "impl_yy", "impl_seq", "exam_typ", "recpt_no_cnt", "exam_pass_cnt"]
+PASS_RATE_FIELDS = ["jm_cd", "doc_pass_rate", "prac_pass_rate"]
 
 SCHEDULE_FIELDS = [
     "jm_cd", "impl_yy", "impl_seq", "doc_reg_start_dt", "description",
@@ -347,45 +348,84 @@ def _to_int(value: str | None) -> int | None:
     return int(value)
 
 
-def fetch_pass_rates(year: int) -> list[dict]:
-    """한 해의 합격률을 등급별로 모아 온다.
+# 합격률을 한 해치로 확정하기 위한 최소 응시자 수.
+# 최신 연도만 쓰면 표본이 작은 종목에서 값이 튄다(석공예기능사 2025년은 응시 3명에 합격 3명이라
+# 100%, 염색기능사(침염)는 6명에 0명이라 0%). 반대로 모든 연도를 합치면 시험이 실제로 어려워진
+# 변화가 묻힌다(설비보전기능사는 최신 5,910명 기준 15.3%인데 10년치로는 40.4%).
+# 그래서 최신 연도부터 쓰되 이 수를 넘길 때까지만 이전 연도를 덧붙인다.
+#
+# 전체 연도를 다 합쳐도 이 수에 못 미치는 종목이 있다(석공예기능사는 5년 응시자가 20명 미만).
+# 그런 종목은 값을 비운다. 3명 중 3명 합격을 "합격률 100%"로 보여주면 쉬운 자격증으로
+# 오해하게 되고, 모른다고 답하는 편이 낫다.
+MIN_PASS_RATE_TAKERS = 100
 
-    한 등급이 많아야 1,600건이라 페이지를 나눌 필요가 없다. 넉넉한 numOfRows로
-    한 번에 받는다(시험일정 API와 달리 이쪽은 큰 값을 거절하지 않는다).
 
-    응답에 jmCd가 들어 있어 종목명으로 맞춰볼 필요 없이 그대로 이어붙일 수 있다.
-    (포털 문서의 출력 목록에는 jmCd가 빠져 있지만 실제로는 내려온다.)
+def fetch_pass_rates(years_back: int = 5) -> list[dict]:
+    """종목별 필기·실기 합격률을 최근 자료 기준으로 하나씩 만든다.
+
+    certification 에는 값 하나만 들어가므로 연도·회차별 원본을 하나로 눌러야 한다.
+    최신 연도부터 응시자 수가 MIN_PASS_RATE_TAKERS 를 넘을 때까지 덧붙인 뒤,
+    합격자 합 / 응시자 합으로 계산한다.
+
+    회차별 퍼센트를 그냥 평균내지 않는 이유는, 응시자 7명인 회차와 2,000명인 회차를 같은
+    무게로 다루면 실제와 크게 어긋나기 때문이다.
+
+    올해는 시험이 끝나야 통계가 올라와 연초에는 비어 있다. 종목마다 최신 연도가 다를 수 있어
+    연도를 고정하지 않고 있는 것부터 쓴다.
     """
-    rows: list[dict] = []
-    for grade in PASS_RATE_GRADES:
-        try:
-            root = _fetch(
-                PASS_RATE_URL,
-                {"grdCd": grade, "baseYY": str(year), "numOfRows": "2000", "pageNo": "1"},
-                "item",
-                f"합격률({year}/{grade})",
-            )
-        except RuntimeError:
-            # 그 해에 해당 등급 데이터가 없으면 item 자체가 없다. 오류가 아니다.
+    this_year = date.today().year
+    years = list(range(this_year, this_year - years_back, -1))
+
+    # (jm_cd, 시험구분) -> {연도: [응시자, 합격자]}
+    buckets: dict[tuple[str, str], dict[int, list[int]]] = {}
+
+    for year in years:
+        for grade in PASS_RATE_GRADES:
+            try:
+                root = _fetch(
+                    PASS_RATE_URL,
+                    {"grdCd": grade, "baseYY": str(year), "numOfRows": "2000", "pageNo": "1"},
+                    "item",
+                    f"합격률({year}/{grade})",
+                )
+            except RuntimeError:
+                # 그 해에 해당 등급 데이터가 없으면 item 자체가 없다. 오류가 아니다.
+                continue
+
+            for item in root.findall(".//item"):
+                jm_cd = _text(item, "jmCd")
+                exam_typ = _text(item, "examTypCcd")
+                takers = _to_int(_text(item, "recptNoCnt"))
+                if not jm_cd or not exam_typ or not takers:
+                    continue
+
+                slot = buckets.setdefault((jm_cd, exam_typ), {}).setdefault(year, [0, 0])
+                slot[0] += takers
+                slot[1] += _to_int(_text(item, "examPassCnt")) or 0
+
+    rates: dict[str, dict] = {}
+    skipped = 0
+    for (jm_cd, exam_typ), per_year in buckets.items():
+        takers = passers = 0
+        for year in sorted(per_year, reverse=True):
+            takers += per_year[year][0]
+            passers += per_year[year][1]
+            if takers >= MIN_PASS_RATE_TAKERS:
+                break
+
+        # 모든 연도를 합쳐도 표본이 모자라면 값을 만들지 않는다.
+        entry = rates.setdefault(jm_cd, {"doc_pass_rate": None, "prac_pass_rate": None})
+        if takers < MIN_PASS_RATE_TAKERS:
+            skipped += 1
             continue
 
-        for item in root.findall(".//item"):
-            jm_cd = _text(item, "jmCd")
-            exam_typ = _text(item, "examTypCcd")
-            if not jm_cd or not exam_typ:
-                continue
-            rows.append(
-                _row(
-                    PASS_RATE_FIELDS,
-                    jm_cd=jm_cd,
-                    impl_yy=year,
-                    impl_seq=_text(item, "implSeq") or "",
-                    exam_typ=exam_typ,
-                    recpt_no_cnt=_to_int(_text(item, "recptNoCnt")),
-                    exam_pass_cnt=_to_int(_text(item, "examPassCnt")),
-                )
-            )
-    return rows
+        column = "doc_pass_rate" if exam_typ == "필기" else "prac_pass_rate"
+        entry[column] = round(passers / takers * 100, 2)
+
+    if skipped:
+        print(f"  응시자가 {MIN_PASS_RATE_TAKERS}명에 못 미쳐 합격률을 비운 항목 {skipped}건")
+
+    return [_row(PASS_RATE_FIELDS, jm_cd=jm_cd, **vals) for jm_cd, vals in rates.items()]
 
 
 # ------------------------------------------------------------------- 응시수수료
@@ -397,10 +437,15 @@ _FEE_PART = re.compile(r"(\d)\s*차\s*:\s*(\d+)")
 
 
 def _parse_fee(contents: str | None) -> dict:
-    fees = {f"fee_{n}": None for n in (1, 2, 3)}
+    """1차를 필기, 2차를 실기로 본다.
+
+    3차가 있는 국가전문자격이 8종목 있으나 저장할 컬럼이 없어 버린다.
+    """
+    names = {"1": "doc_fee", "2": "prac_fee"}
+    fees: dict = {"doc_fee": None, "prac_fee": None}
     for seq, amount in _FEE_PART.findall(contents or ""):
-        if seq in ("1", "2", "3"):
-            fees[f"fee_{seq}"] = int(amount)
+        if seq in names:
+            fees[names[seq]] = int(amount)
     return fees
 
 
@@ -437,7 +482,9 @@ def sync_exam_fees(conn) -> int:
 
     if missing:
         print(f"  수수료 정보 없는 종목 {missing}건")
-    return upsert(conn, "exam_fee", FEE_FIELDS, rows, ["jm_cd"])
+    # certification 에 이미 있는 행을 갱신하는 것이므로 키 컬럼(jm_cd)은 그대로 두고
+    # 나머지만 덮어쓴다. upsert 가 그렇게 동작한다.
+    return upsert(conn, "certification", FEE_FIELDS, rows, ["jm_cd"])
 
 
 # ------------------------------------------------------------------------- DB
@@ -504,14 +551,9 @@ def main() -> None:
         print("응시수수료 수집...")
         print(f"  {sync_exam_fees(conn)}건 저장")
 
-        # 합격률은 등급 단위로만 조회되므로 한 해에 요청 7번이면 끝난다.
         print("합격률 수집...")
-        rates = 0
-        for target_year in range(year - PASS_RATE_YEARS + 1, year + 1):
-            rows = fetch_pass_rates(target_year)
-            rates += upsert(conn, "pass_rate", PASS_RATE_FIELDS, rows,
-                            ["jm_cd", "impl_yy", "impl_seq", "exam_typ"])
-        print(f"  {rates}건 저장")
+        rates = fetch_pass_rates(PASS_RATE_YEARS)
+        print(f"  {upsert(conn, 'certification', PASS_RATE_FIELDS, rates, ['jm_cd'])}건 저장")
 
         # 연말에는 다음 해 일정이 먼저 올라오므로 두 해를 함께 받는다.
         # 종목마다 호출해야 해서 가장 오래 걸리는 단계다.

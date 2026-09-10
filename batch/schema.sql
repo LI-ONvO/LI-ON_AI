@@ -10,7 +10,23 @@ CREATE TABLE IF NOT EXISTS certification (
     jm_cd      VARCHAR(10)  PRIMARY KEY,  -- 종목코드
     jm_nm      VARCHAR(200) NOT NULL,     -- 종목명
     qual_gb_cd VARCHAR(2),                -- 자격구분 T:국가기술 S:국가전문 W:일학습병행 C:과정평가형
-    series_nm  VARCHAR(30)                -- 계열명 (기술사/기능장/기사/기능사). W/C는 NULL
+    series_nm  VARCHAR(30),               -- 계열명 (기술사/기능장/기사/기능사). W/C는 NULL
+
+    -- 합격률(%). 최근 자료 기준으로 종목당 한 값만 담는다.
+    -- 원본은 연도·회차·필기실기별로 나뉘고(2024년 한 해가 2,783행), 한 해 안에서도 회차마다
+    -- 다르다(한식조리기능사 2024 필기: 1회 43.3% / 2회 43.0% / 3회 40.6%).
+    -- 최신 연도부터 응시자 100명을 넘길 때까지 합쳐 "합격자 합 / 응시자 합"으로 계산한다.
+    -- 회차나 연도의 퍼센트를 평균내지 않는다. 응시자 7명인 회차와 2,000명인 회차를 같은
+    -- 무게로 다루면 실제와 어긋난다.
+    -- 다 합쳐도 100명이 안 되는 희귀 종목(505개 중 61개)은 NULL로 둔다. 3명 중 3명 합격을
+    -- "합격률 100%"로 보여주면 쉬운 자격증으로 오해하게 된다.
+    doc_pass_rate  DECIMAL(5,2),  -- 필기. 실기만 있는 종목이나 표본 부족이면 NULL
+    prac_pass_rate DECIMAL(5,2),  -- 실기. 실기가 없는 종목이나 표본 부족이면 NULL
+
+    -- 응시수수료(원). 검정형(T/S)에만 있다.
+    -- 3차까지 있는 국가전문자격이 8종목 있으나 담을 컬럼이 없어 버린다.
+    doc_fee  INT,  -- 1차(필기)
+    prac_fee INT   -- 2차(실기)
 ) DEFAULT CHARSET=utf8mb4;
 
 -- 국가기술자격 상세 설명 (약 490건). 챗봇이 추천 이유를 설명할 때 쓴다.
@@ -62,29 +78,4 @@ CREATE TABLE IF NOT EXISTS exam_schedule (
     PRIMARY KEY (jm_cd, impl_yy, impl_seq, reg_key)
 ) DEFAULT CHARSET=utf8mb4;
 
--- 연도별·회차별 합격률. 종목코드로 certification 과 이어진다.
--- 한 회차에 필기/실기 두 행이 생기므로 시험구분까지 키에 넣는다.
---
--- API가 주는 합격률(passRate)은 저장하지 않는다. 응시자수·합격자수로 결정되는 값이라
--- 이행종속이 생기고(3NF 위반), 정정이 들어오면 두 값이 어긋날 수 있다.
--- 게다가 API 값은 "43%"처럼 소수점을 버리거나 18.75를 18.8로 반올림해 원본보다 부정확하다.
--- 조회할 때 SUM(합격자)/SUM(응시자)로 계산한다.
-CREATE TABLE IF NOT EXISTS pass_rate (
-    jm_cd         VARCHAR(10) NOT NULL,  -- 종목코드 (certification.jm_cd)
-    impl_yy       SMALLINT    NOT NULL,  -- 시행년도
-    impl_seq      VARCHAR(4)  NOT NULL,  -- 회차. 기능사 상시시험이 있어 세 자리까지 온다
-    exam_typ      VARCHAR(4)  NOT NULL,  -- 필기 / 실기
-    recpt_no_cnt  INT,                   -- 응시자수
-    exam_pass_cnt INT,                   -- 합격자수
-    PRIMARY KEY (jm_cd, impl_yy, impl_seq, exam_typ)
-) DEFAULT CHARSET=utf8mb4;
 
--- 응시수수료. 검정형(국가기술·국가전문)에만 있다.
--- 원문이 "1차 : 19400, 2차 : 22600" 형태로 오는데, 1차만 있거나 3차까지 있는 종목이 있어
--- 차수별 컬럼으로 나눠 담는다. 613종목 전부 확인한 결과 차수·금액 외의 텍스트는 없다.
-CREATE TABLE IF NOT EXISTS exam_fee (
-    jm_cd VARCHAR(10) PRIMARY KEY,
-    fee_1 INT,
-    fee_2 INT,
-    fee_3 INT
-) DEFAULT CHARSET=utf8mb4;
