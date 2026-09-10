@@ -7,17 +7,20 @@
   GET  /ready        레디니스 체크 (설정 완비 여부)
   POST /v1/chat      대화 맥락 기반 AI 응답 생성
   POST /v1/roadmap   대화 맥락 기반 구조화 로드맵 생성
+
+/v1 아래는 X-API-Key 헤더가 있어야 한다. 상태 확인용 엔드포인트는 인증 없이 연다.
 """
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
 from app.api import health
 from app.api.errors import register_exception_handlers
 from app.api.middleware import register_middleware
 from app.api.v1.router import api_router
+from app.core.security import require_api_key
 from app.core.config import settings
 from app.core.logging import configure_logging, get_logger
 
@@ -53,8 +56,9 @@ def create_app() -> FastAPI:
     register_middleware(app)
     register_exception_handlers(app)
 
+    # /health 와 /ready 는 인증 없이 둔다. 배포 플랫폼과 백엔드가 서버 상태를 확인하는 통로다.
     app.include_router(health.router)
-    app.include_router(api_router, prefix="/v1")
+    app.include_router(api_router, prefix="/v1", dependencies=[Depends(require_api_key)])
 
     return app
 

@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     log_level: str = "INFO"
 
+    # 백엔드가 X-API-Key 헤더에 담아 보내는 값. 비어 있으면 /v1 요청을 모두 거절한다.
+    # (설정을 빠뜨렸을 때 조용히 무방비가 되지 않도록)
+    api_key: str = ""
+
     # --- LLM ---
     openai_api_key: str = ""
     model_name: str = "gpt-4o-mini"
