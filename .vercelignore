@@ -3,6 +3,10 @@
 .env.*
 !.env.example
 
+# pytest·ruff 설정만 들어있고 의존성 목록이 아니다. 두면 Vercel이 이걸 의존성 파일로 보고
+# uv 로 설치하려다 "No `project` table found" 로 빌드가 깨진다. 빼면 requirements.txt 를 쓴다.
+pyproject.toml
+
 # 배포에 필요 없다. 배치는 내 노트북에서 돌린다.
 batch/
 tests/
