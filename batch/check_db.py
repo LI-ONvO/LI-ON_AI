@@ -39,7 +39,8 @@ def main() -> None:
         print("[O] 포트 연결 성공")
     except Exception as exc:
         print(f"[X] 포트 연결 실패: {exc}")
-        print("    - 서버가 켜져 있는지, 같은 네트워크인지 확인하세요.")
+        print("    - 주소와 포트가 맞는지 확인하세요.")
+        print("    - 접속 허용 IP 목록에 내 IP 가 있어야 합니다. 관리형 DB 는 기본으로 막아둡니다.")
         print("    - MySQL 이 bind-address=127.0.0.1 로 묶여 있으면 외부에서 못 붙습니다.")
         return
     finally:
@@ -57,9 +58,11 @@ def main() -> None:
         if code == 1130:
             print("    이 IP 에서 접속할 수 있는 계정이 없지롱병신.")
             print("    MySQL 은 계정을 '아이디 + 접속 위치' 한 쌍으로 구분합니다.")
-            print("    서버에서 아래를 실행해 달라고 요청하세요:")
-            print(f"      CREATE USER '{user}'@'192.168.1.%' IDENTIFIED BY '<비밀번호>';")
-            print(f"      GRANT ALL PRIVILEGES ON {database}.* TO '{user}'@'192.168.1.%';")
+            print("    서버에서 아래를 실행해 달라고 요청하세요.")
+            print("    ('%' 는 아무 곳에서나 접속을 허용한다는 뜻입니다. 접속 위치가 정해져 있으면")
+            print("     그 주소로 좁히는 편이 안전합니다.)")
+            print(f"      CREATE USER '{user}'@'%' IDENTIFIED BY '<비밀번호>';")
+            print(f"      GRANT ALL PRIVILEGES ON {database}.* TO '{user}'@'%';")
             print("      FLUSH PRIVILEGES;")
         elif code == 1045:
             print("    아이디 또는 비밀번호가 틀렸지롱병신. .env 값을 확인하세요.")
