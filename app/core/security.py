@@ -17,9 +17,6 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-API_KEY_HEADER = "X-API-Key"
-
-
 class MissingAPIKeyConfig(AIServerError):
     status_code = 500
     code = "API_KEY_NOT_CONFIGURED"
@@ -31,7 +28,12 @@ class InvalidAPIKey(AIServerError):
 
 
 async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
-    """X-API-Key 헤더를 검사한다. FastAPI가 헤더명을 x_api_key 로 변환해 넘긴다."""
+    """X-API-Key 헤더를 검사한다.
+
+    헤더 이름은 이 인자 이름에서 나온다. FastAPI가 밑줄을 붙임표로 바꿔
+    x_api_key -> x-api-key 로 찾는다. 인자 이름을 바꾸면 헤더 이름도 바뀌므로,
+    백엔드와 맞춘 뒤가 아니면 건드리지 않는다. (HTTP 헤더는 대소문자를 가리지 않는다.)
+    """
     if not settings.api_key:
         logger.error("API_KEY가 설정되지 않았습니다. .env 또는 배포 환경변수를 확인하세요.")
         raise MissingAPIKeyConfig("서버에 인증키가 설정되지 않았습니다.")
