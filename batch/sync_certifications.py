@@ -11,6 +11,7 @@ AI 서버는 이 테이블을 읽기만 하므로, 데이터를 채우거나 갱
 
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import xml.etree.ElementTree as ET
 from datetime import date
@@ -50,6 +51,11 @@ PASS_RATE_GRADES = ("10", "20", "30", "31", "32", "33", "40")
 
 # 이 API는 한 페이지 50건을 넘기면 resultCode 930으로 거절한다.
 SCHEDULE_PAGE_SIZE = 50
+
+# 일정은 종목마다 한 번씩 불러야 해서 호출이 수천 번이다(2개 연도면 7천 번 넘게).
+# 한 번에 1~2초씩 걸리므로 하나씩 부르면 몇 시간이 걸린다. 조회만 여러 개 동시에 하고,
+# DB 저장과 진행 기록은 한 곳에서 순서대로 한다. 너무 늘리면 공공 API가 거절할 수 있다.
+SCHEDULE_WORKERS = 8
 
 # 상세정보 API의 계열코드. 산업기사는 전용 코드가 없고 03(기사)에 함께 들어온다.
 SERIES_CODES = ("01", "02", "03", "04")
@@ -290,50 +296,56 @@ def sync_exam_schedules(conn, year: int) -> int:
         print(f"  이전 진행 기록 {len(done)}종목을 건너뛴다")
 
     key = ["jm_cd", "impl_yy", "impl_seq", "doc_reg_start_dt"]
+    pending = [jm_cd for jm_cd in jm_cds if jm_cd not in done]
     saved = 0
     failed = 0
     checkpoint = open(_checkpoint_path(year), "a", encoding="utf-8")
 
+    # 조회(느림)는 스레드들이 동시에 하고, 저장·기록은 이 스레드에서만 한다.
+    # DB 연결과 체크포인트 파일을 여러 스레드가 함께 쓰지 않게 하기 위해서다.
     try:
-        for index, jm_cd in enumerate(jm_cds, start=1):
-            if jm_cd in done:
-                continue
+        with ThreadPoolExecutor(max_workers=SCHEDULE_WORKERS) as pool:
+            futures = {
+                pool.submit(_fetch_schedules_for, jm_cd, year, f"시험일정({jm_cd})"): jm_cd
+                for jm_cd in pending
+            }
+            for index, future in enumerate(as_completed(futures), start=1):
+                jm_cd = futures[future]
+                try:
+                    items = future.result()
+                except RuntimeError:
+                    # 실패한 종목은 체크포인트에 남기지 않는다. 다시 실행하면 재시도된다.
+                    failed += 1
+                    continue
 
-            try:
-                items = _fetch_schedules_for(jm_cd, year, f"시험일정({jm_cd})")
-            except RuntimeError:
-                # 실패한 종목은 체크포인트에 남기지 않는다. 다시 실행하면 재시도된다.
-                failed += 1
-                continue
+                rows = [
+                    _row(
+                        SCHEDULE_FIELDS,
+                        jm_cd=jm_cd,
+                        impl_yy=year,
+                        impl_seq=_text(item, "implSeq") or "",
+                        doc_reg_start_dt=_to_date(_text(item, "docRegStartDt")),
+                        description=_text(item, "description"),
+                        doc_reg_end_dt=_to_date(_text(item, "docRegEndDt")),
+                        doc_exam_start_dt=_to_date(_text(item, "docExamStartDt")),
+                        doc_exam_end_dt=_to_date(_text(item, "docExamEndDt")),
+                        doc_pass_dt=_to_date(_text(item, "docPassDt")),
+                        prac_reg_start_dt=_to_date(_text(item, "pracRegStartDt")),
+                        prac_reg_end_dt=_to_date(_text(item, "pracRegEndDt")),
+                        prac_exam_start_dt=_to_date(_text(item, "pracExamStartDt")),
+                        prac_exam_end_dt=_to_date(_text(item, "pracExamEndDt")),
+                        prac_pass_dt=_to_date(_text(item, "pracPassDt")),
+                    )
+                    for item in items
+                ]
+                saved += upsert(conn, "exam_schedule", SCHEDULE_FIELDS, rows, key)
 
-            rows = [
-                _row(
-                    SCHEDULE_FIELDS,
-                    jm_cd=jm_cd,
-                    impl_yy=year,
-                    impl_seq=_text(item, "implSeq") or "",
-                    doc_reg_start_dt=_to_date(_text(item, "docRegStartDt")),
-                    description=_text(item, "description"),
-                    doc_reg_end_dt=_to_date(_text(item, "docRegEndDt")),
-                    doc_exam_start_dt=_to_date(_text(item, "docExamStartDt")),
-                    doc_exam_end_dt=_to_date(_text(item, "docExamEndDt")),
-                    doc_pass_dt=_to_date(_text(item, "docPassDt")),
-                    prac_reg_start_dt=_to_date(_text(item, "pracRegStartDt")),
-                    prac_reg_end_dt=_to_date(_text(item, "pracRegEndDt")),
-                    prac_exam_start_dt=_to_date(_text(item, "pracExamStartDt")),
-                    prac_exam_end_dt=_to_date(_text(item, "pracExamEndDt")),
-                    prac_pass_dt=_to_date(_text(item, "pracPassDt")),
-                )
-                for item in items
-            ]
-            saved += upsert(conn, "exam_schedule", SCHEDULE_FIELDS, rows, key)
+                # DB 저장이 끝난 뒤에 기록해야, 저장 직전에 죽었을 때 이 종목을 다시 받는다.
+                checkpoint.write(f"{jm_cd}\n")
+                checkpoint.flush()
 
-            # DB 저장이 끝난 뒤에 기록해야, 저장 직전에 죽었을 때 이 종목을 다시 받는다.
-            checkpoint.write(f"{jm_cd}\n")
-            checkpoint.flush()
-
-            if index % 100 == 0:
-                print(f"  {index}/{len(jm_cds)} 종목 처리 | 저장 {saved}건 실패 {failed}건")
+                if index % 200 == 0:
+                    print(f"  {index}/{len(pending)} 종목 처리 | 저장 {saved}건 실패 {failed}건")
     finally:
         checkpoint.close()
 
