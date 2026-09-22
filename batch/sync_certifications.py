@@ -114,6 +114,18 @@ def _parse(resp: requests.Response, item_tag: str) -> ET.Element | None:
     return root if (root.findtext(".//resultCode") or "").strip() == "00" else None
 
 
+class DailyQuotaExceeded(Exception):
+    """공공데이터포털 일일 호출 한도를 다 썼다. 재시도해도 소용없으니 배치 전체를 멈춘다.
+
+    RuntimeError 를 상속하지 않는다. 종목 하나의 실패(RuntimeError)는 건너뛰고 계속하지만,
+    한도 초과는 그 뒤 모든 호출이 실패하므로 잡히지 않고 올라가야 한다.
+    """
+
+
+def _is_quota_exceeded(resp: requests.Response) -> bool:
+    return resp.status_code == 429 or "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS" in resp.text
+
+
 def _fetch(url: str, params: dict, item_tag: str, label: str, retries: int = 5) -> ET.Element:
     """일시적 오류(resultCode=99 등)는 간격을 늘려가며 재시도한다."""
     last = ""
@@ -125,6 +137,10 @@ def _fetch(url: str, params: dict, item_tag: str, label: str, retries: int = 5) 
         except requests.RequestException as exc:
             last = f"요청 실패: {exc}"
             continue
+
+        # 일일 한도를 넘기면 오늘은 더 불러도 전부 거절된다. 쉬었다 재시도하면 시간만 버린다.
+        if _is_quota_exceeded(resp):
+            raise DailyQuotaExceeded(f"{label}: 일일 호출 한도 초과")
 
         root = _parse(resp, item_tag)
         if root is not None:
@@ -299,6 +315,7 @@ def sync_exam_schedules(conn, year: int) -> int:
     pending = [jm_cd for jm_cd in jm_cds if jm_cd not in done]
     saved = 0
     failed = 0
+    quota_hit = False
     checkpoint = open(_checkpoint_path(year), "a", encoding="utf-8")
 
     # 조회(느림)는 스레드들이 동시에 하고, 저장·기록은 이 스레드에서만 한다.
@@ -313,6 +330,11 @@ def sync_exam_schedules(conn, year: int) -> int:
                 jm_cd = futures[future]
                 try:
                     items = future.result()
+                except DailyQuotaExceeded:
+                    # 아직 시작 안 한 조회는 취소한다. 그대로 두면 수천 개가 전부 거절당하며 돈다.
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    quota_hit = True
+                    break
                 except RuntimeError:
                     # 실패한 종목은 체크포인트에 남기지 않는다. 다시 실행하면 재시도된다.
                     failed += 1
@@ -348,6 +370,13 @@ def sync_exam_schedules(conn, year: int) -> int:
                     print(f"  {index}/{len(pending)} 종목 처리 | 저장 {saved}건 실패 {failed}건")
     finally:
         checkpoint.close()
+
+    if quota_hit:
+        # 한도 초과로 멈췄다. 체크포인트를 남겨두면 내일 같은 명령으로 이어서 받는다.
+        remaining = len(jm_cds) - len(_load_checkpoint(year))
+        print(f"  일일 호출 한도 초과로 중단. 저장 {saved}건, 남은 종목 {remaining}개")
+        print("  내일 같은 명령을 다시 실행하면 이어서 받는다.")
+        raise DailyQuotaExceeded(f"{year}년 일정 수집 중 한도 초과")
 
     if failed:
         # 실패한 종목이 남아 있으면 체크포인트를 남겨둔다. 다시 실행하면 그것만 재시도한다.
