@@ -93,12 +93,19 @@ def _get(url: str, params: dict, timeout: int = REQUEST_TIMEOUT_SECONDS) -> requ
 
 
 def _parse(resp: requests.Response, item_tag: str) -> ET.Element | None:
-    """item_tag가 있으면 성공으로 본다. 이 API들은 오류도 200으로 내려주기 때문이다."""
+    """성공 응답이면 root 를, 아니면 None 을 돌려준다. 이 API들은 오류도 200으로 내려준다.
+
+    item_tag 가 있으면 성공이다. 없더라도 resultCode 가 00 이면 "조회는 됐는데 데이터가 없음"
+    이라는 정상 응답이다(일정이 없는 종목, 응시료가 없는 폐지 종목 등). 이걸 오류로 보면
+    재시도하며 수십 초씩 쉬게 된다. 일정이 없는 종목이 수천 개라 그대로 두면 몇십 시간이 걸린다.
+    """
     try:
         root = ET.fromstring(resp.content)
     except ET.ParseError:
         return None
-    return root if root.find(f".//{item_tag}") is not None else None
+    if root.find(f".//{item_tag}") is not None:
+        return root
+    return root if (root.findtext(".//resultCode") or "").strip() == "00" else None
 
 
 def _fetch(url: str, params: dict, item_tag: str, label: str, retries: int = 5) -> ET.Element:
@@ -467,24 +474,27 @@ def sync_exam_fees(conn) -> int:
         jm_cds = [row["jm_cd"] for row in cursor.fetchall()]
 
     rows = []
-    missing = 0
+    missing = failed = 0
     for jm_cd in jm_cds:
         try:
             root = _fetch(FEE_URL, {"jmCd": jm_cd}, "item", f"응시수수료({jm_cd})", retries=3)
         except RuntimeError:
-            # 폐지된 종목 등은 item 없이 빈 응답이 온다. 오류가 아니다.
-            missing += 1
+            # 진짜 오류(서버 응답 이상)다. 이 종목만 건너뛰고 계속한다.
+            failed += 1
             continue
 
         item = root.find(".//item")
-        contents = _text(item, "contents") if item is not None else None
-        rows.append(_row(FEE_FIELDS, jm_cd=jm_cd, **_parse_fee(contents)))
+        if item is None:
+            # 폐지된 종목 등은 빈 응답이 온다. 정상이다.
+            missing += 1
+            continue
+        rows.append(_row(FEE_FIELDS, jm_cd=jm_cd, **_parse_fee(_text(item, "contents"))))
 
     if missing:
         print(f"  수수료 정보 없는 종목 {missing}건")
-    # certification 에 이미 있는 행을 갱신하는 것이므로 키 컬럼(jm_cd)은 그대로 두고
-    # 나머지만 덮어쓴다. upsert 가 그렇게 동작한다.
-    return upsert(conn, "certification", FEE_FIELDS, rows, ["jm_cd"])
+    if failed:
+        print(f"  조회 실패 {failed}건 (다시 실행하면 재시도된다)")
+    return update_existing(conn, "certification", FEE_FIELDS, rows, ["jm_cd"])
 
 
 # ------------------------------------------------------------------------- DB
@@ -528,6 +538,26 @@ def upsert(conn, table: str, fields: list[str], rows: list[dict], key_fields: li
     return len(rows)
 
 
+def update_existing(conn, table: str, fields: list[str], rows: list[dict], key_fields: list[str]) -> int:
+    """이미 있는 행의 일부 컬럼만 고친다. 없는 행은 만들지 않는다.
+
+    응시료·합격률은 certification 에 컬럼으로 붙어 있어 upsert 를 쓰면 안 된다.
+    INSERT ... ON DUPLICATE KEY UPDATE 는 행이 이미 있어도 INSERT 부분을 먼저 검사해서,
+    넣지 않은 NOT NULL 컬럼(jm_nm 등) 때문에 "doesn't have a default value" 로 거절된다.
+    그리고 목록에 없는 종목의 통계가 와도 빈 자격증 행을 새로 만들면 안 된다.
+    """
+    if not rows:
+        return 0
+    assignments = ", ".join(f"{f} = %({f})s" for f in fields if f not in key_fields)
+    condition = " AND ".join(f"{k} = %({k})s" for k in key_fields)
+    sql = f"UPDATE {table} SET {assignments} WHERE {condition}"
+
+    with conn.cursor() as cursor:
+        cursor.executemany(sql, rows)
+    conn.commit()
+    return len(rows)
+
+
 # ------------------------------------------------------------------------ main
 
 def main() -> None:
@@ -546,6 +576,13 @@ def main() -> None:
 
         print("상세 설명 수집...")
         details = fetch_qual_details()
+        # qual_detail 은 certification 을 외래키로 참조한다. 상세정보 API가 목록에 없는 종목을
+        # 하나라도 돌려주면 한 번에 넣는 전체가 거절되므로, 목록에 있는 것만 남긴다.
+        known = {cert["jm_cd"] for cert in certs}
+        orphans = [d["jm_cd"] for d in details if d["jm_cd"] not in known]
+        if orphans:
+            print(f"  목록에 없는 종목 {len(orphans)}건 제외: {', '.join(orphans[:10])}")
+        details = [d for d in details if d["jm_cd"] in known]
         print(f"  {upsert(conn, 'qual_detail', DETAIL_FIELDS, details, ['jm_cd'])}건 저장")
 
         print("응시수수료 수집...")
@@ -553,7 +590,7 @@ def main() -> None:
 
         print("합격률 수집...")
         rates = fetch_pass_rates(PASS_RATE_YEARS)
-        print(f"  {upsert(conn, 'certification', PASS_RATE_FIELDS, rates, ['jm_cd'])}건 저장")
+        print(f"  {update_existing(conn, 'certification', PASS_RATE_FIELDS, rates, ['jm_cd'])}건 갱신")
 
         # 연말에는 다음 해 일정이 먼저 올라오므로 두 해를 함께 받는다.
         # 종목마다 호출해야 해서 가장 오래 걸리는 단계다.

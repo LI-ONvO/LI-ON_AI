@@ -20,7 +20,7 @@ from batch.sync_certifications import (
     connect,
     create_tables,
     fetch_pass_rates,
-    upsert,
+    update_existing,
 )
 
 # 최근 연도부터 몇 해까지 거슬러 올라가며 데이터를 찾을지.
@@ -41,7 +41,7 @@ def main() -> None:
         create_tables(conn)
         print(f"합격률 수집... (최근 {years_back}년까지 훑는다)")
         rows = fetch_pass_rates(years_back)
-        saved = upsert(conn, "certification", PASS_RATE_FIELDS, rows, KEY_FIELDS)
+        saved = update_existing(conn, "certification", PASS_RATE_FIELDS, rows, KEY_FIELDS)
         print(f"  {saved}종목 갱신")
     finally:
         conn.close()
