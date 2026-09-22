@@ -536,9 +536,28 @@ def create_tables(conn) -> None:
     conn.commit()
 
 
+# 저장 직전에 연결이 끊겨 있으면 이만큼 다시 붙어본다(초 단위 간격 x 횟수).
+# DB에 SSH 터널로 붙을 때 VPN이 서버를 바꾸면 터널이 잠깐 끊기는데, 그때마다 몇십 분짜리
+# 배치가 통째로 멈추지 않게 한다. 터널이 다시 열릴 때까지 기다렸다가 이어간다.
+RECONNECT_WAIT_SECONDS = 10
+RECONNECT_ATTEMPTS = 12
+
+
+def _ensure_connection(conn) -> None:
+    for attempt in range(RECONNECT_ATTEMPTS):
+        try:
+            conn.ping(reconnect=True)
+            return
+        except pymysql.MySQLError as exc:
+            print(f"  DB 연결 끊김, {RECONNECT_WAIT_SECONDS}초 뒤 재시도 ({attempt + 1}/{RECONNECT_ATTEMPTS}): {exc}")
+            time.sleep(RECONNECT_WAIT_SECONDS)
+    conn.ping(reconnect=True)  # 마지막 시도. 실패하면 예외가 그대로 올라간다.
+
+
 def upsert(conn, table: str, fields: list[str], rows: list[dict], key_fields: list[str]) -> int:
     if not rows:
         return 0
+    _ensure_connection(conn)
     columns = ", ".join(fields)
     placeholders = ", ".join(f"%({f})s" for f in fields)
     updates = ", ".join(f"{f} = VALUES({f})" for f in fields if f not in key_fields)
@@ -560,6 +579,7 @@ def update_existing(conn, table: str, fields: list[str], rows: list[dict], key_f
     """
     if not rows:
         return 0
+    _ensure_connection(conn)
     assignments = ", ".join(f"{f} = %({f})s" for f in fields if f not in key_fields)
     condition = " AND ".join(f"{k} = %({k})s" for k in key_fields)
     sql = f"UPDATE {table} SET {assignments} WHERE {condition}"
