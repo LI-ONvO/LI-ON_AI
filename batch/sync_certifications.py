@@ -318,8 +318,17 @@ def sync_exam_schedules(conn, year: int) -> int:
     체크포인트는 "중단된 실행을 이어붙이는" 용도일 뿐이다. 한 번 끝까지 돌면 지워서,
     다음에 실행할 때는 처음부터 다시 받아 최신 일정으로 갱신되게 한다.
     """
+    # 하루 호출 수가 제한돼 있어 순서가 곧 우선순위다.
+    # 학생이 실제로 보는 것은 검정형(국가기술 T, 국가전문 S)이고, 일학습병행 W 는 기업에
+    # 학습근로자로 취업해야 응시할 수 있어 2,838종목 대부분이 일정 자체가 없다.
+    # 종목코드로만 정렬하면 W 코드가 2K0B 처럼 숫자로 시작해 T 사이사이에 끼어든다.
     with conn.cursor() as cursor:
-        cursor.execute("SELECT jm_cd FROM certification ORDER BY jm_cd")
+        cursor.execute(
+            """
+            SELECT jm_cd FROM certification
+            ORDER BY FIELD(qual_gb_cd, 'T', 'S', 'C', 'W'), jm_cd
+            """
+        )
         jm_cds = [row["jm_cd"] for row in cursor.fetchall()]
 
     done = _load_checkpoint(year)
