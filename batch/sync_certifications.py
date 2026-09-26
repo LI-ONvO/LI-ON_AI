@@ -55,7 +55,10 @@ SCHEDULE_PAGE_SIZE = 50
 # 일정은 종목마다 한 번씩 불러야 해서 호출이 수천 번이다(2개 연도면 7천 번 넘게).
 # 한 번에 1~2초씩 걸리므로 하나씩 부르면 몇 시간이 걸린다. 조회만 여러 개 동시에 하고,
 # DB 저장과 진행 기록은 한 곳에서 순서대로 한다. 너무 늘리면 공공 API가 거절할 수 있다.
-SCHEDULE_WORKERS = 8
+SCHEDULE_WORKERS = 4
+
+# 순간 제한(429)에 걸렸을 때 쉬는 시간. 하루 한도와 달리 잠깐 기다리면 풀린다.
+THROTTLE_BACKOFF_SECONDS = 3
 
 # 상세정보 API의 계열코드. 산업기사는 전용 코드가 없고 03(기사)에 함께 들어온다.
 SERIES_CODES = ("01", "02", "03", "04")
@@ -123,7 +126,13 @@ class DailyQuotaExceeded(Exception):
 
 
 def _is_quota_exceeded(resp: requests.Response) -> bool:
-    return resp.status_code == 429 or "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS" in resp.text
+    """오늘 쓸 수 있는 횟수를 다 썼는지.
+
+    429 만으로 판단하면 안 된다. 짧은 시간에 몰아서 보낼 때도 429 가 오는데, 그건 잠깐
+    쉬었다 다시 보내면 되는 일시적인 제한이다. 하루치를 다 쓴 경우에만 본문에
+    LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS(사유코드 22)가 들어 있다.
+    """
+    return "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS" in resp.text
 
 
 def _fetch(url: str, params: dict, item_tag: str, label: str, retries: int = 5) -> ET.Element:
@@ -141,6 +150,12 @@ def _fetch(url: str, params: dict, item_tag: str, label: str, retries: int = 5) 
         # 일일 한도를 넘기면 오늘은 더 불러도 전부 거절된다. 쉬었다 재시도하면 시간만 버린다.
         if _is_quota_exceeded(resp):
             raise DailyQuotaExceeded(f"{label}: 일일 호출 한도 초과")
+
+        # 순간적으로 몰아서 보냈을 때의 제한. 조금 쉬었다 다시 보내면 통과한다.
+        if resp.status_code == 429:
+            last = f"요청이 몰려 429 (잠시 후 재시도)"
+            time.sleep(THROTTLE_BACKOFF_SECONDS)
+            continue
 
         root = _parse(resp, item_tag)
         if root is not None:
