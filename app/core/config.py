@@ -40,13 +40,13 @@ class Settings(BaseSettings):
     min_roadmap_steps: int = 3
     max_roadmap_steps: int = 8
 
-    # --- 자격증 DB ---
-    # 자격증 목록·상세·시험일정은 배치가 채워두고, 이 서버는 읽기만 한다.
-    mysql_host: str = ""
-    mysql_port: int = 3306
-    mysql_user: str = ""
-    mysql_password: str = ""
-    mysql_db: str = ""
+    # --- 자격증 조회 (백엔드 API) ---
+    # 자격증 DB 는 백엔드 서버 안쪽에 있어 직접 읽지 않고 백엔드 API 로 조회한다.
+    # (DB 를 채우는 배치는 batch/ 에서 MySQL 에 직접 쓴다. 이 설정과 무관하다.)
+    backend_api_base_url: str = ""
+    backend_api_key: str = ""
+    # 챗봇 한 번에 최대 4번 부르므로 길게 잡으면 전체 응답이 늘어진다.
+    backend_timeout_seconds: float = 10.0
 
     # 한 번에 모델에 넘길 자격증 후보 수. 많으면 프롬프트가 커지고 적으면 고를 폭이 없다.
     max_candidates: int = 12

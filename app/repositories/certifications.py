@@ -1,17 +1,19 @@
 """자격증 조회.
 
-배치가 채워둔 네 테이블을 읽는다.
-  certification   전체 자격증 목록 (합격률·응시료 포함)
-  qual_detail     국가기술자격 상세 설명 (진로·수행직무·개요·출제경향·변천과정)
-  exam_schedule   회차별 시험일정
+자격증 DB 는 백엔드 서버 안쪽에 있어 직접 읽지 않고 백엔드 API 로 조회한다(app/core/backend.py).
+명세는 docs/BACKEND_API.md. 데이터를 채우는 배치는 batch/ 에서 DB 에 직접 쓴다.
 
 챗봇이 없는 자격증을 지어내지 않도록, 추천·설명은 반드시 여기를 거친다.
+
+백엔드는 DB 행에 가까운 형태로 주고, 모델에게 보여줄 모양(순위, 일정 라벨, 지난 일정 표시)은
+여기서 만든다. 그래야 백엔드와 가공 로직이 갈라지지 않는다.
 """
 
+import time
 from datetime import date
 
+from app.core.backend import get_json
 from app.core.config import settings
-from app.core.db import fetch_all
 
 # 같은 종목명이 자격구분만 다르게 존재한다(예: 프로그래밍기능사 = 국가기술자격/과정평가형자격).
 # 시험 일정이 서로 다르므로 이름만으로 하나를 고르면 안 된다.
@@ -22,16 +24,8 @@ QUAL_GB_NAMES = {
     "C": "과정평가형자격",
 }
 
-# 검색어가 어디에 걸렸는지에 따라 가중치를 다르게 준다.
-# 설명 본문(career/summary)은 길어서 "정보" 같은 흔한 단어가 무관한 종목에도 걸리기 때문이다.
-_MATCH_FIELDS = [
-    ("c.jm_nm", 100),          # 종목명
-    ("d.mdoblig_fld_nm", 50),  # 직종
-    ("d.hist", 30),            # 변천과정 - 폐지된 옛 종목명이 남아있다
-    ("d.job", 10),             # 수행직무
-    ("d.summary", 3),          # 개요
-    ("d.career", 1),           # 진로
-]
+# 백엔드 검색 API 가 받는 키워드 최대 개수. 넘기면 422 로 거절된다.
+MAX_SEARCH_KEYWORDS = 5
 
 
 def _truncate(value: str | None) -> str | None:
@@ -40,141 +34,29 @@ def _truncate(value: str | None) -> str | None:
     return value[: settings.max_field_chars]
 
 
-def _build_search_sql(keywords: list[str], joiner: str) -> tuple[str, list[str]]:
-    conditions = []
-    scores = []
-    args: list[str] = []
-    score_args: list[str] = []
-
-    for keyword in keywords:
-        like = f"%{keyword}%"
-        conditions.append("(" + " OR ".join(f"{col} LIKE %s" for col, _ in _MATCH_FIELDS) + ")")
-        args.extend([like] * len(_MATCH_FIELDS))
-
-        scores.append(
-            " + ".join(
-                f"(CASE WHEN {col} LIKE %s THEN {weight} ELSE 0 END)"
-                for col, weight in _MATCH_FIELDS
-            )
-        )
-        score_args.extend([like] * len(_MATCH_FIELDS))
-
-    sql = f"""
-        SELECT c.jm_cd, c.jm_nm, c.series_nm, d.mdoblig_fld_nm,
-               d.job, d.summary, d.career, d.hist,
-               {" + ".join(scores)} AS score
-        FROM qual_detail d
-        JOIN certification c ON c.jm_cd = d.jm_cd
-        WHERE {joiner.join(conditions)}
-        ORDER BY score DESC, c.jm_nm
-        LIMIT %s
-    """
-    return sql, [*score_args, *args]
+def _qual_gb_name(code: str | None) -> str | None:
+    return QUAL_GB_NAMES.get(code, code) if code else None
 
 
-async def search_certifications(keywords: list[str], limit: int | None = None) -> list[dict]:
-    """키워드로 자격증을 찾는다. 상세 설명이 있는 국가기술자격이 대상이다.
+# --------------------------------------------------------------------------- 상세
 
-    AND(모든 키워드가 걸린 것)를 먼저 시도한다. OR로만 하면 "정보처리 + 기능사" 검색에
-    "기능사"만 걸린 도배기능사 같은 무관한 종목이 딸려온다. 다만 "요리 + 조리"처럼
-    한 종목이 두 단어를 다 갖지 않는 경우 AND는 0건이 되므로 그때는 OR로 되돌린다.
-    """
-    if not keywords:
-        return []
-
-    limit = limit or settings.max_candidates
-
-    rows: list[dict] = []
-    for joiner in (" AND ", " OR "):
-        sql, args = _build_search_sql(keywords, joiner)
-        rows = await fetch_all(sql, [*args, limit])
-        if rows:
-            break
-
-    return [
-        {
-            # 모델은 점수 계산을 모르므로 순위를 명시해 준다 (1이 가장 관련도 높음).
-            "rank": index,
-            "relevanceScore": int(row["score"]),
-            "jmCd": row["jm_cd"],
-            "jmNm": row["jm_nm"],
-            "seriesNm": row["series_nm"],
-            "mdobligFldNm": row["mdoblig_fld_nm"],
-            "job": _truncate(row["job"]),
-            "summary": _truncate(row["summary"]),
-            "career": _truncate(row["career"]),
-            "hist": _truncate(row["hist"]),
-        }
-        for index, row in enumerate(rows, start=1)
-    ]
+# 같은 요청 안에서 상세를 여러 번 부른다. 로드맵은 종목 정보 1번 + 올해·내년 일정 2번으로
+# 같은 종목 상세를 세 번 가져온다. 상세 응답에 일정·응시료·합격률이 다 들어 있으므로 잠깐 보관한다.
+# 서버리스라 인스턴스가 살아 있는 동안만 유지되고, 배치가 하루 한 번 갱신하는 데이터라 짧게 둔다.
+_DETAIL_TTL_SECONDS = 60
+_detail_cache: dict[str, tuple[float, dict | None]] = {}
 
 
-# 추천 대상 자격구분. 검정형 국가기술자격만 쓴다.
-#   T 국가기술자격  - 원서접수만으로 응시 가능. 상세 설명도 있다.
-#   C 과정평가형     - 지정 교육기관 과정을 이수해야 취득. T와 같은 이름이 많아 카드가 중복된다.
-#   S 국가전문자격   - 공인노무사·관광통역안내사 등 성인 대상이 대부분.
-#   W 일학습병행     - 기업에 학습근로자로 취업해야 응시 가능. 종목명도 "..._L2_ver1.0" 형태다.
-RECOMMENDABLE_QUAL_GB_CDS = ("T",)
+async def _get_detail(jm_cd: str) -> dict | None:
+    """GET /api/certificates/{jmCd}. 없는 종목이면 None."""
+    now = time.monotonic()
+    cached = _detail_cache.get(jm_cd)
+    if cached and now - cached[0] < _DETAIL_TTL_SECONDS:
+        return cached[1]
 
-
-async def list_recommendable_certifications() -> list[dict]:
-    """추천 후보가 될 자격증 목록(약 490건).
-
-    목록이 작아 프롬프트에 전부 넣을 수 있고, 그러면 모델이 DB에 없는 자격증을 지어낼 수 없다.
-    키워드 LIKE 검색은 "보안"에 철도신호기사가 걸리는 식의 오매칭이 있어 추천에는 쓰지 않는다.
-
-    자격구분을 명시적으로 거른다. qual_details 조인만으로도 지금은 T만 남지만, 그건 배치가
-    T의 설명만 수집하기 때문이라 다른 자격구분 설명이 채워지면 추천 대상이 조용히 늘어난다.
-    """
-    placeholders = ", ".join(["%s"] * len(RECOMMENDABLE_QUAL_GB_CDS))
-    rows = await fetch_all(
-        f"""
-        SELECT c.jm_cd, c.jm_nm, c.series_nm, d.mdoblig_fld_nm
-        FROM qual_detail d
-        JOIN certification c ON c.jm_cd = d.jm_cd
-        WHERE c.qual_gb_cd IN ({placeholders})
-        ORDER BY d.mdoblig_fld_nm, c.jm_nm
-        """,
-        list(RECOMMENDABLE_QUAL_GB_CDS),
-    )
-    return [
-        {
-            "jmCd": row["jm_cd"],
-            "jmNm": row["jm_nm"],
-            "seriesNm": row["series_nm"],
-            "mdobligFldNm": row["mdoblig_fld_nm"],
-        }
-        for row in rows
-    ]
-
-
-async def get_certifications(jm_cds: list[str]) -> list[dict]:
-    """여러 종목을 한 번에 조회한다. 추천 결과에 설명을 붙일 때 쓴다."""
-    if not jm_cds:
-        return []
-
-    placeholders = ", ".join(["%s"] * len(jm_cds))
-    rows = await fetch_all(
-        f"""
-        SELECT c.jm_cd, c.jm_nm, c.series_nm, d.mdoblig_fld_nm, d.job, d.summary, d.career
-        FROM certification c
-        LEFT JOIN qual_detail d ON d.jm_cd = c.jm_cd
-        WHERE c.jm_cd IN ({placeholders})
-        """,
-        jm_cds,
-    )
-    return [
-        {
-            "jmCd": row["jm_cd"],
-            "jmNm": row["jm_nm"],
-            "seriesNm": row["series_nm"],
-            "mdobligFldNm": row["mdoblig_fld_nm"],
-            "job": _truncate(row["job"]),
-            "summary": _truncate(row["summary"]),
-            "career": _truncate(row["career"]),
-        }
-        for row in rows
-    ]
+    detail = await get_json(f"/api/certificates/{jm_cd}")
+    _detail_cache[jm_cd] = (now, detail)
+    return detail
 
 
 async def get_certification(jm_cd: str) -> dict | None:
@@ -182,30 +64,78 @@ async def get_certification(jm_cd: str) -> dict | None:
 
     상세 설명은 국가기술자격에만 있으므로, 그 외 자격구분이면 이름·계열만 채워진다.
     """
-    rows = await fetch_all(
-        """
-        SELECT c.jm_cd, c.jm_nm, c.qual_gb_cd, c.series_nm,
-               d.mdoblig_fld_nm, d.job, d.summary, d.career
-        FROM certification c
-        LEFT JOIN qual_detail d ON d.jm_cd = c.jm_cd
-        WHERE c.jm_cd = %s
-        """,
-        [jm_cd],
-    )
-    if not rows:
+    detail = await _get_detail(jm_cd)
+    if detail is None:
         return None
 
-    row = rows[0]
     return {
-        "jmCd": row["jm_cd"],
-        "jmNm": row["jm_nm"],
-        "qualGbNm": QUAL_GB_NAMES.get(row["qual_gb_cd"], row["qual_gb_cd"]),
-        "seriesNm": row["series_nm"],
-        "mdobligFldNm": row["mdoblig_fld_nm"],
-        "job": _truncate(row["job"]),
-        "summary": _truncate(row["summary"]),
-        "career": _truncate(row["career"]),
+        "jmCd": detail.get("jmCd"),
+        "jmNm": detail.get("name"),
+        "qualGbNm": _qual_gb_name(detail.get("qualGbCd")),
+        "seriesNm": detail.get("seriesNm"),
+        "mdobligFldNm": detail.get("mdobligFldNm"),
+        "job": _truncate(detail.get("job")),
+        # 백엔드 명세상 description 이 qual_detail.summary 다.
+        "summary": _truncate(detail.get("description")),
+        "career": _truncate(detail.get("career")),
     }
+
+
+# --------------------------------------------------------------------------- 검색
+
+async def search_certifications(keywords: list[str], limit: int | None = None) -> list[dict]:
+    """키워드로 자격증을 찾는다. 상세 설명이 있는 국가기술자격이 대상이다.
+
+    가중치 검색(종목명 100 · 직종 50 · 변천과정 30 · 수행직무 10 · 개요 3 · 진로 1)과
+    "AND 먼저, 0건이면 OR" 규칙은 백엔드가 수행한다.
+    """
+    cleaned = list(dict.fromkeys(k.strip() for k in keywords if k and k.strip()))
+    if not cleaned:
+        return []
+
+    body = await get_json(
+        "/api/certificates/search",
+        {
+            "keywords": ",".join(cleaned[:MAX_SEARCH_KEYWORDS]),
+            "size": limit or settings.max_candidates,
+        },
+    )
+    rows = (body or {}).get("content", [])
+
+    return [
+        {
+            # 모델은 점수 계산을 모르므로 순위를 명시해 준다 (1이 가장 관련도 높음).
+            "rank": index,
+            "relevanceScore": int(row.get("score") or 0),
+            "jmCd": row.get("jmCd"),
+            "jmNm": row.get("name"),
+            "seriesNm": row.get("seriesNm"),
+            "mdobligFldNm": row.get("mdobligFldNm"),
+            "job": _truncate(row.get("job")),
+            "summary": _truncate(row.get("summary")),
+            "career": _truncate(row.get("career")),
+            "hist": _truncate(row.get("hist")),
+        }
+        for index, row in enumerate(rows, start=1)
+    ]
+
+
+async def list_recommendable_certifications() -> list[dict]:
+    """추천 후보가 될 자격증 목록(약 490건).
+
+    목록이 작아 프롬프트에 전부 넣을 수 있고, 그러면 모델이 DB에 없는 자격증을 지어낼 수 없다.
+    국가기술자격(T) 중 상세 설명이 있는 종목만 백엔드가 골라 준다.
+    """
+    body = await get_json("/api/certificates/recommendable")
+    return [
+        {
+            "jmCd": row.get("jmCd"),
+            "jmNm": row.get("name"),
+            "seriesNm": row.get("seriesNm"),
+            "mdobligFldNm": row.get("mdobligFldNm"),
+        }
+        for row in (body or {}).get("content", [])
+    ]
 
 
 async def resolve_certification(query: str, limit: int = 20) -> dict:
@@ -214,31 +144,51 @@ async def resolve_certification(query: str, limit: int = 20) -> dict:
     "기능사"처럼 넓은 검색어는 수백 건이 걸리므로 목록은 limit까지만 돌려주되,
     total에 실제 전체 개수를 담는다(잘린 목록을 전부라고 오해하지 않도록).
     """
-    where = "WHERE jm_cd = %s OR jm_nm LIKE %s"
-    args = [query, f"%{query}%"]
+    query = query.strip()
+    if not query:
+        return {"total": 0, "matches": []}
 
-    counted = await fetch_all(f"SELECT COUNT(*) AS total FROM certification {where}", args)
-    rows = await fetch_all(
-        f"""
-        SELECT jm_cd, jm_nm, qual_gb_cd FROM certification
-        {where}
-        ORDER BY CASE WHEN jm_nm = %s THEN 0 ELSE 1 END, jm_nm
-        LIMIT %s
-        """,
-        [*args, query, limit],
-    )
-
+    body = await get_json("/api/certificates/resolve", {"query": query, "size": limit}) or {}
     return {
-        "total": counted[0]["total"] if counted else 0,
+        "total": body.get("totalElements", 0),
         "matches": [
             {
-                "jmCd": row["jm_cd"],
-                "jmNm": row["jm_nm"],
-                "qualGbNm": QUAL_GB_NAMES.get(row["qual_gb_cd"], row["qual_gb_cd"]),
+                "jmCd": row.get("jmCd"),
+                "jmNm": row.get("name"),
+                "qualGbNm": _qual_gb_name(row.get("qualGbCd")),
             }
-            for row in rows
+            for row in body.get("content", [])
         ],
     }
+
+
+# --------------------------------------------------------------------------- 일정
+
+def _to_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+
+
+def _seq_number(value: str | None) -> int:
+    """회차 "01" 과 "1" 을 같은 값으로 정렬하기 위해 숫자로 바꾼다."""
+    try:
+        return int(value or 0)
+    except ValueError:
+        return 0
+
+
+_EVENT_FIELDS = (
+    ("docRegStartDt", "docRegEndDt", "필기 원서접수"),
+    ("docExamStartDt", "docExamEndDt", "필기 시험"),
+    ("docPassDt", None, "필기 합격발표"),
+    ("pracRegStartDt", "pracRegEndDt", "실기 원서접수"),
+    ("pracExamStartDt", "pracExamEndDt", "실기 시험"),
+    ("pracPassDt", None, "실기 합격발표"),
+)
 
 
 async def fetch_exam_schedules(jm_cd: str, year: int | None = None) -> list[dict]:
@@ -247,39 +197,25 @@ async def fetch_exam_schedules(jm_cd: str, year: int | None = None) -> list[dict
     일정은 종목마다 다르다(같은 '기사' 계열이라도 연 1~3회로 제각각이고, 아예 없는 종목도 있다).
     빈 목록은 "그 해 일정이 없음"을 뜻하며 오류가 아니다.
 
-    데이터는 batch/sync_certifications.py 가 채운다. 이 서버는 읽기만 한다.
+    백엔드 상세 응답에 모든 연도 일정이 함께 오므로 여기서 연도를 거른다.
     """
     year = year or date.today().year
-    rows = await fetch_all(
-        """
-        SELECT description, impl_seq,
-               doc_reg_start_dt, doc_reg_end_dt,
-               doc_exam_start_dt, doc_exam_end_dt, doc_pass_dt,
-               prac_reg_start_dt, prac_reg_end_dt,
-               prac_exam_start_dt, prac_exam_end_dt, prac_pass_dt
-        FROM exam_schedule
-        WHERE jm_cd = %s AND impl_yy = %s
-        ORDER BY impl_seq, doc_reg_start_dt
-        """,
-        [jm_cd, year],
-    )
+    detail = await _get_detail(jm_cd)
+    if detail is None:
+        return []
+
+    rows = [s for s in detail.get("examSchedules") or [] if s.get("implYy") == year]
+    rows.sort(key=lambda s: (_seq_number(s.get("implSeq")), s.get("docRegStartDt") or ""))
 
     today = date.today()
     schedules = []
     for row in rows:
         events = []
-        for start_col, end_col, label in (
-            ("doc_reg_start_dt", "doc_reg_end_dt", "필기 원서접수"),
-            ("doc_exam_start_dt", "doc_exam_end_dt", "필기 시험"),
-            ("doc_pass_dt", None, "필기 합격발표"),
-            ("prac_reg_start_dt", "prac_reg_end_dt", "실기 원서접수"),
-            ("prac_exam_start_dt", "prac_exam_end_dt", "실기 시험"),
-            ("prac_pass_dt", None, "실기 합격발표"),
-        ):
-            start = row.get(start_col)
+        for start_key, end_key, label in _EVENT_FIELDS:
+            start = _to_date(row.get(start_key))
             if not start:
                 continue
-            end = row.get(end_col) if end_col else None
+            end = _to_date(row.get(end_key)) if end_key else None
             events.append({
                 "label": label,
                 "start": start.isoformat(),
@@ -287,33 +223,34 @@ async def fetch_exam_schedules(jm_cd: str, year: int | None = None) -> list[dict
                 "upcoming": (end or start) >= today,
             })
 
+        seq = _seq_number(row.get("implSeq"))
         schedules.append({
-            "description": row["description"],
-            "implSeq": row["impl_seq"],
+            # 백엔드 일정에는 회차 설명 문구가 없어 만든다. 로드맵이 올해·내년 일정을 함께 보므로
+            # 연도가 드러나야 모델이 헷갈리지 않는다.
+            "description": f"{year}년도 제{seq}회" if seq else f"{year}년도",
+            "implSeq": row.get("implSeq"),
             "events": events,
         })
 
     return schedules
 
 
+# ----------------------------------------------------------------- 합격률·응시료
+
 async def fetch_pass_rate(jm_cd: str) -> dict | None:
     """필기·실기 합격률(%)을 반환한다. 없으면 None.
 
-    배치가 저장해 둔 값은 가장 최근 연도 하나다. 연도별 추이는 담고 있지 않다.
-    국가기술자격에만 통계가 있어 그 외 자격구분은 대개 NULL이다.
+    배치가 저장해 둔 값은 최근 자료 기준 하나다. 연도별 추이는 담고 있지 않다.
+    국가기술자격에만 통계가 있어 그 외 자격구분은 대개 null 이다.
     """
-    rows = await fetch_all(
-        "SELECT doc_pass_rate, prac_pass_rate FROM certification WHERE jm_cd = %s",
-        [jm_cd],
-    )
-    if not rows:
+    detail = await _get_detail(jm_cd)
+    if detail is None:
         return None
 
-    row = rows[0]
     rates = [
-        {"examType": label, "passRate": float(row[key])}
-        for key, label in (("doc_pass_rate", "필기"), ("prac_pass_rate", "실기"))
-        if row[key] is not None
+        {"examType": label, "passRate": float(detail[key])}
+        for key, label in (("docPassRate", "필기"), ("pracPassRate", "실기"))
+        if detail.get(key) is not None
     ]
     return {"passRates": rates} if rates else None
 
@@ -324,17 +261,13 @@ async def fetch_exam_fee(jm_cd: str) -> dict | None:
     검정형(국가기술·국가전문)에만 있다. 일학습병행·과정평가형은 응시료 개념이 없어
     None이 정상이다.
     """
-    rows = await fetch_all(
-        "SELECT doc_fee, prac_fee FROM certification WHERE jm_cd = %s",
-        [jm_cd],
-    )
-    if not rows:
+    detail = await _get_detail(jm_cd)
+    if detail is None:
         return None
 
-    row = rows[0]
     fees = [
-        {"examType": label, "won": row[key]}
-        for key, label in (("doc_fee", "필기"), ("prac_fee", "실기"))
-        if row[key] is not None
+        {"examType": label, "won": detail[key]}
+        for key, label in (("docFee", "필기"), ("pracFee", "실기"))
+        if detail.get(key) is not None
     ]
     return {"fees": fees} if fees else None

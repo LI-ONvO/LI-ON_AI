@@ -11,12 +11,14 @@ langchain-core>=0.3.15,<0.4.0
 langchain-openai==0.2.6
 openai>=1.54.0,<2.0.0
 
-# 자격증 DB (배치가 채워둔 참조 데이터를 읽기만 한다)
+# 자격증 DB 적재용. 배치(batch/)만 쓴다. 서버는 백엔드 API 로 조회한다.
 PyMySQL==1.1.1
 
 # 배치에서 공공데이터 API 호출용
 requests==2.32.3
 
+# 백엔드 조회 API 호출용 (비동기)
+httpx==0.27.2
+
 # --- 개발/테스트 ---
 pytest==8.3.3
-httpx==0.27.2

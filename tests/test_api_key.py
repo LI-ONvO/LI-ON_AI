@@ -21,7 +21,8 @@ def _with_key(key: str | None):
 def test_health_is_open_without_key():
     """배포 플랫폼이 상태를 확인해야 하므로 인증을 걸지 않는다."""
     assert client.get("/health").status_code == 200
-    assert client.get("/ready").status_code == 200
+    # /ready 는 설정 상태에 따라 200 또는 503 이다. 여기서 보는 건 인증을 요구하지 않는다는 점이다.
+    assert client.get("/ready").status_code != 401
 
 
 def test_v1_rejects_missing_key():

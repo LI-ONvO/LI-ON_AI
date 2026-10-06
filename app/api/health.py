@@ -27,6 +27,11 @@ async def ready() -> JSONResponse:
     missing = []
     if not settings.openai_api_key:
         missing.append("OPENAI_API_KEY")
+    # 자격증 조회를 백엔드 API 로 하므로, 없으면 인사말 외의 거의 모든 답변이 실패한다.
+    if not settings.backend_api_base_url:
+        missing.append("BACKEND_API_BASE_URL")
+    if not settings.backend_api_key:
+        missing.append("BACKEND_API_KEY")
 
     if missing:
         return JSONResponse(
