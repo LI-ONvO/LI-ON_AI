@@ -113,6 +113,71 @@ def test_roadmap_uses_real_exam_dates_of_selected_certification(monkeypatch, pat
     assert "실기 원서접수" in prompt
 
 
+CLOSED_ROUND = [
+    {
+        # 필기 접수가 끝나고 실기만 남은 회차. 필기를 안 본 학생은 응시할 수 없다.
+        "description": "2026년도 제3회",
+        "implSeq": "3",
+        "events": [
+            {"label": "필기 원서접수", "start": "2026-07-20", "end": "2026-07-23", "upcoming": False},
+            {"label": "실기 원서접수", "start": "2026-09-21", "end": "2026-10-19", "upcoming": True},
+            {"label": "실기 시험", "start": "2026-11-14", "end": "2026-11-28", "upcoming": True},
+        ],
+    }
+]
+
+
+def _run_roadmap_with(monkeypatch, patch_cert, schedules) -> str:
+    patch_cert(CERT, "app.chains.roadmap_chain")
+    monkeypatch.setattr(
+        "app.chains.roadmap_chain.fetch_exam_schedules", AsyncMock(return_value=schedules)
+    )
+    draft = RoadmapDraft(
+        title="플랜", steps=[RoadmapStepDraft(title="스텝", description="설명", order_no=1)]
+    )
+    model = FakeModel(draft)
+    monkeypatch.setattr("app.chains.roadmap_chain.get_chat_model", lambda **_: model)
+    asyncio.run(run_roadmap_chain([], jm_cd="1320"))
+    return _all_text(model)
+
+
+def test_roadmap_hides_rounds_closed_to_new_applicants(monkeypatch, patch_cert):
+    """접수가 끝난 회차만 있으면 그 날짜를 넘기지 않는다.
+
+    넘기면 모델이 남은 실기 날짜를 목표로 잡아, 필기를 안 본 학생에게 응시할 수 없는
+    일정을 만든다(실제로 그랬다).
+    """
+    prompt = _run_roadmap_with(monkeypatch, patch_cert, CLOSED_ROUND)
+
+    assert "새로 원서접수할 수 있는 회차가 없습니다" in prompt
+    assert "아직 공개되지 않았습니다" in prompt
+    assert "2026-11-14" not in prompt
+
+
+def test_roadmap_tells_model_when_no_schedule_at_all(monkeypatch, patch_cert):
+    prompt = _run_roadmap_with(monkeypatch, patch_cert, [])
+
+    assert "등록된 시험일정이 없습니다" in prompt
+
+
+def test_roadmap_keeps_open_round_dates(monkeypatch, patch_cert):
+    """접수 가능한 회차가 하나라도 있으면 실제 날짜를 그대로 넘긴다."""
+    open_round = [
+        {
+            "description": "2027년도 제1회",
+            "implSeq": "1",
+            "events": [
+                {"label": "필기 원서접수", "start": "2027-01-12", "end": "2027-01-15", "upcoming": True},
+                {"label": "필기 시험", "start": "2027-02-07", "end": "2027-02-07", "upcoming": True},
+            ],
+        }
+    ]
+    prompt = _run_roadmap_with(monkeypatch, patch_cert, CLOSED_ROUND + open_round)
+
+    assert "2027-01-12" in prompt
+    assert "새로 원서접수할 수 있는 회차가 없습니다" not in prompt
+
+
 def test_roadmap_falls_back_when_no_schedule(monkeypatch, patch_cert):
     """일정이 없어도 실패하지 않고 대화 맥락만으로 로드맵을 만든다."""
     patch_cert(CERT, "app.chains.roadmap_chain")

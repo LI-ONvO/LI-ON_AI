@@ -77,8 +77,41 @@ def _format_schedules(jm_nm: str, schedules: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _is_open_for_new_applicants(schedule: dict) -> bool:
+    """이 회차에 지금 새로 원서를 낼 수 있는지.
+
+    회차의 첫 원서접수(필기가 있으면 필기, 실기만 있는 회차면 실기)가 아직 끝나지 않았어야 한다.
+    필기 접수가 끝난 회차는 실기 일정이 남아 있어도 필기를 안 본 사람은 응시할 수 없다.
+    """
+    registrations = [e for e in schedule["events"] if e["label"].endswith("원서접수")]
+    return bool(registrations) and registrations[0]["upcoming"]
+
+
+def _no_open_round_note(jm_nm: str, has_any_schedule: bool) -> str:
+    """새로 접수할 수 있는 회차가 없을 때 모델에게 줄 안내.
+
+    이 경우 끝난 회차의 일정은 넘기지 않는다. 넘기면 "필기 접수 종료"라고 표시해도 모델이
+    남아 있는 실기 날짜를 목표로 잡아, 필기를 안 본 학생에게 응시할 수 없는 일정을 짜 준다.
+    (2026-10 실제 사례: 정보처리기사 로드맵이 접수가 끝난 3회 실기를 목표로 5주 계획을 냈다)
+    """
+    situation = (
+        "올해 원서접수는 모두 끝났고 다음 시험 일정은 아직 공개되지 않았습니다."
+        if has_any_schedule
+        else "등록된 시험일정이 없습니다."
+    )
+    return "\n".join([
+        f"[{jm_nm} 시험일정]",
+        f"지금 새로 원서접수할 수 있는 회차가 없습니다. {situation}",
+        "- 시험일과 원서접수일을 지어내지 마세요. 끝난 회차의 날짜를 목표로 삼지 마세요.",
+        "- 대화에 학습 기간(예: 3개월)이 있으면 오늘부터 그 기간 안에서 공부 순서대로 "
+        "target_date 를 정하세요. 기간을 추정할 근거가 없으면 target_date 는 null 로 두세요.",
+        "- 마지막 스텝은 '다음 회차 일정 확인 후 원서접수'로 하고 target_date 는 null 로 두세요.",
+        "- 로드맵 title 에 시험 회차나 시험 날짜를 넣지 마세요.",
+    ])
+
+
 async def _load_exam_context(jm_cd: str) -> str | None:
-    """선택된 자격증의 실제 시험일정을 프롬프트용 텍스트로 만든다.
+    """선택된 자격증의 실제 시험일정을 프롬프트용 텍스트로 만든다. 종목이 없으면 None.
 
     이 정보가 없으면 모델이 "3개월 남았다" 같은 말만 보고 날짜를 지어낸다.
     로드맵의 핵심은 실제 시험일에서 역산하는 것이므로 근거를 함께 넘긴다.
@@ -97,8 +130,10 @@ async def _load_exam_context(jm_cd: str) -> str | None:
 
     # 모든 일정이 지나간 회차는 로드맵의 근거가 되지 못하고 프롬프트만 늘린다.
     schedules = [s for s in schedules if any(event["upcoming"] for event in s["events"])]
-    if not schedules:
-        return None
+
+    if not any(_is_open_for_new_applicants(s) for s in schedules):
+        logger.info("새로 접수할 수 있는 회차가 없어 날짜를 고정하지 않습니다. | jmCd=%s", jm_cd)
+        return _no_open_round_note(target["jmNm"], has_any_schedule=bool(schedules))
 
     return _format_schedules(target["jmNm"], schedules)
 
@@ -121,7 +156,7 @@ async def run_roadmap_chain(
     if exam_context:
         instruction = f"{exam_context}\n\n{instruction}"
     else:
-        logger.info("시험일정이 없어 대화 맥락만으로 로드맵을 만듭니다. | jmCd=%s", jm_cd)
+        logger.info("종목 정보를 찾지 못해 대화 맥락만으로 로드맵을 만듭니다. | jmCd=%s", jm_cd)
 
     messages = build_messages(system_prompt, history, instruction)
 
