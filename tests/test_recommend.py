@@ -12,7 +12,7 @@ from app.chains.recommend_chain import RecommendationDraft
 from app.core.exceptions import LLMOutputError, LLMTimeoutError
 from app.services.recommend_service import normalize_items
 
-VALID = {"1320", "2290", "6892"}
+VALID = {"1320": "기사", "2290": "산업기사", "6892": "기능사"}
 
 
 def _draft(jm_cd: str, reason: str = "이유") -> RecommendationDraft:
@@ -80,7 +80,8 @@ def test_recommend_returns_items(client, mock_chain):
     res = client.post("/recommendations", json=_payload())
 
     assert res.status_code == 200
-    assert res.json() == {"items": [{"jmCd": "1320", "reason": "정보기술 기초가 됩니다."}]}
+    assert res.json()["items"][0]["jmCd"] == "1320"
+    assert res.json()["items"][0]["reason"].startswith("정보기술 기초가 됩니다.")
 
 
 def test_recommend_size_is_capped(client, mock_chain):
@@ -115,3 +116,32 @@ def test_size_out_of_range_is_rejected(client):
     res = client.post("/recommendations", json=_payload(size=0))
 
     assert res.status_code == 422
+
+
+def test_drops_weakly_related_items():
+    """모델이 관련도 "약함"으로 표시한 항목은 개수를 채우는 용도이므로 버린다."""
+    weak = RecommendationDraft(jm_cd="2290", reason="이유", fit="약함")
+    items = normalize_items([_draft("6892"), weak], VALID, 5)
+
+    assert [i.jm_cd for i in items] == ["6892"]
+
+
+def test_adds_eligibility_note_to_upper_grades():
+    """고등학생은 산업기사·기사에 바로 응시할 수 없으므로 안내를 붙인다. 기능사에는 붙이지 않는다."""
+    items = normalize_items([_draft("6892"), _draft("2290"), _draft("1320")], VALID, 5)
+    reasons = {i.jm_cd: i.reason for i in items}
+
+    assert reasons["6892"] == "이유"
+    assert "응시할 수" in reasons["2290"] and "산업기사" in reasons["2290"]
+    assert "응시할 수" in reasons["1320"] and "산업기사" not in reasons["1320"]
+
+
+def test_grade_is_read_from_name_not_series():
+    """seriesNm 은 산업기사도 "기사"로 오므로 이름에서 등급을 읽는다."""
+    from app.chains.recommend_chain import _grade
+
+    assert _grade("정보처리산업기사", "기사") == "산업기사"
+    assert _grade("정보처리기사", "기사") == "기사"
+    assert _grade("미용사(네일)", "기능사") == "기능사"
+    assert _grade("소방설비산업기사(기계분야)", "기사") == "산업기사"
+    assert _grade("사회조사분석사2급", "기사") == "기타(기사 계열)"
