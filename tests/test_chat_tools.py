@@ -130,3 +130,52 @@ def test_history_is_sent_to_model(patch_model):
     contents = [getattr(m, "content", "") for m in model.calls[0]]
     assert "정보처리기사 준비 중이야" in contents
     assert "8월이요" in contents
+
+
+# ------------------------------------------------- 같은 이름의 과정평가형 숨기기
+
+def _resolved(*matches, total=None):
+    from unittest.mock import AsyncMock
+    rows = [{"jmCd": cd, "jmNm": nm, "qualGbNm": gb} for cd, nm, gb in matches]
+    return AsyncMock(return_value={"total": total if total is not None else len(rows), "matches": rows})
+
+
+def test_course_based_twin_is_hidden(monkeypatch):
+    """같은 이름의 국가기술자격이 있으면 과정평가형은 빼서 한 종목만 안내한다."""
+    import asyncio
+    from app.chains import tools
+    monkeypatch.setattr(tools, "resolve_certification", _resolved(
+        ("6921", "프로그래밍기능사", "국가기술자격"),
+        ("E921", "프로그래밍기능사", "과정평가형자격"),
+    ))
+    result = asyncio.run(tools._resolve("프로그래밍기능사"))
+
+    assert [m["jmCd"] for m in result["matches"]] == ["6921"]
+    assert result["total"] == 1
+
+
+def test_course_based_without_twin_is_kept(monkeypatch):
+    """이름이 겹치지 않는 과정평가형은 그대로 찾을 수 있어야 한다."""
+    import asyncio
+    from app.chains import tools
+    monkeypatch.setattr(tools, "resolve_certification", _resolved(
+        ("C999", "어떤과정평가형전용자격", "과정평가형자격"),
+    ))
+    result = asyncio.run(tools._resolve("어떤과정평가형전용자격"))
+
+    assert [m["jmCd"] for m in result["matches"]] == ["C999"]
+
+
+def test_total_is_reduced_by_hidden_twins(monkeypatch):
+    """넓은 검색어에서도 숨긴 만큼 전체 개수를 줄여, 되묻기 판단이 부풀지 않게 한다."""
+    import asyncio
+    from app.chains import tools
+    monkeypatch.setattr(tools, "resolve_certification", _resolved(
+        ("6921", "프로그래밍기능사", "국가기술자격"),
+        ("E921", "프로그래밍기능사", "과정평가형자격"),
+        ("7910", "한식조리기능사", "국가기술자격"),
+        total=40,
+    ))
+    result = asyncio.run(tools._resolve("기능사"))
+
+    assert result["total"] == 39

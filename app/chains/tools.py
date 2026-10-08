@@ -24,6 +24,22 @@ logger = get_logger(__name__)
 # 모델에게 "각각 조회하라"고 맡기면 일부만 조회하고 나머지를 누락한다.
 MAX_AUTO_FETCH = 3
 
+# 같은 종목명이 국가기술자격(T)과 과정평가형자격(C)으로 208쌍 있다(프로그래밍기능사 = 6921 / E921).
+# 과정평가형은 지정 교육기관에서 수백 시간 과정을 이수해야 응시할 수 있어, 원서접수로 응시하는
+# 학생에게는 해당이 없다. 설명도 없고 44쌍은 과정평가형 쪽 일정이 아예 없어서, 둘 다 보여주면
+# "같은 자격증인데 하나는 일정이 있고 하나는 없다"는 혼란만 준다. 같은 이름의 국가기술자격이
+# 있으면 과정평가형은 뺀다. 이름이 겹치지 않는 과정평가형은 그대로 찾을 수 있다.
+_COURSE_BASED = "과정평가형자격"
+_EXAM_BASED = "국가기술자격"
+
+
+async def _resolve(query: str) -> dict:
+    resolved = await resolve_certification(query)
+    matches = resolved["matches"]
+    exam_names = {m["jmNm"] for m in matches if m["qualGbNm"] == _EXAM_BASED}
+    kept = [m for m in matches if not (m["qualGbNm"] == _COURSE_BASED and m["jmNm"] in exam_names)]
+    return {"total": resolved["total"] - (len(matches) - len(kept)), "matches": kept}
+
 TOOL_SPECS = [
     {
         "type": "function",
@@ -130,7 +146,7 @@ async def _search_tool(keywords: list[str]) -> dict:
 
 
 async def _schedule_tool(query: str, year: int | None) -> dict:
-    resolved = await resolve_certification(query)
+    resolved = await _resolve(query)
     matches, total = resolved["matches"], resolved["total"]
 
     if not matches:
@@ -161,14 +177,14 @@ async def _schedule_tool(query: str, year: int | None) -> dict:
     if len(results) > 1:
         payload["note"] = (
             "같은 이름의 자격증이 자격구분별로 여러 개 있습니다. "
-            "일정이 서로 다르므로 qualGbNm으로 구분해 모두 안내하세요."
+            "일정이 서로 다르므로 qualGbNm으로 구분해 안내하세요."
         )
     return payload
 
 
 async def _pass_rate_tool(query: str) -> dict:
     """일정 도구와 같은 방식으로 종목을 특정한 뒤 합격률을 붙인다."""
-    resolved = await resolve_certification(query)
+    resolved = await _resolve(query)
     matches, total = resolved["matches"], resolved["total"]
 
     if not matches:
@@ -207,7 +223,7 @@ async def _pass_rate_tool(query: str) -> dict:
 
 
 async def _fee_tool(query: str) -> dict:
-    resolved = await resolve_certification(query)
+    resolved = await _resolve(query)
     matches, total = resolved["matches"], resolved["total"]
 
     if not matches:
