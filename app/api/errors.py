@@ -33,7 +33,13 @@ def register_exception_handlers(app: FastAPI) -> None:
         return _error_response(exc.status_code, exc.code, exc.message)
 
     @app.exception_handler(RequestValidationError)
-    async def handle_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+    async def handle_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # 어느 필드가 틀렸는지 로그로 남긴다. 응답 본문은 호출한 쪽만 보므로 로그가 없으면 원인을 못 찾는다.
+        # 입력값(input)은 사용자 정보가 섞일 수 있어 남기지 않는다.
+        problems = [
+            f"{'.'.join(str(p) for p in e.get('loc', ()))}: {e.get('type')}" for e in exc.errors()
+        ]
+        logger.warning("요청 형식 오류 | %s %s | %s", request.method, request.url.path, "; ".join(problems))
         return _error_response(
             422,
             "INVALID_REQUEST",

@@ -9,7 +9,8 @@ from app.schemas.base import CamelModel
 
 
 class OnboardingAnswer(CamelModel):
-    key: str = Field(description="온보딩 항목 키. 예: study_time")
+    # 팀 명세서에는 key 가 없다(title/values 만 보냄). 추천에는 title 만 쓰므로 선택 항목으로 둔다.
+    key: str | None = Field(default=None, description="온보딩 항목 키. 예: study_time")
     title: str = Field(description="항목 제목. 예: 하루 학습 가능 시간")
     values: list[str] = Field(default_factory=list, description="사용자가 고른 값들")
 
