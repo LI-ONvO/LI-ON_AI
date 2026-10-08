@@ -67,11 +67,11 @@ pytest
 | --- | --- | --- |
 | GET | `/health` | 프로세스 생존 확인 (LLM 호출 없음) |
 | GET | `/ready` | 설정 완비 여부 확인 |
-| POST | `/v1/chat` | 대화 맥락 기반 AI 응답 생성 |
-| POST | `/v1/roadmap` | 대화 맥락 기반 구조화 로드맵 생성 |
-| POST | `/v1/recommend` | 사용자 프로필 기반 자격증 추천 (대화 없음) |
+| POST | `/chat` | 대화 맥락 기반 AI 응답 생성 |
+| POST | `/roadmaps` | 대화 맥락 기반 구조화 로드맵 생성 |
+| POST | `/recommendations` | 사용자 프로필 기반 자격증 추천 (대화 없음) |
 
-### POST /v1/chat
+### POST /chat
 
 백엔드의 `POST /api/chat/sessions/{sessionId}/messages` 에 대응합니다.
 
@@ -100,7 +100,7 @@ pytest
 `history` 는 오래된 메시지가 앞에 오도록 정렬해서 보냅니다. 서버는 최근
 `MAX_HISTORY_MESSAGES` 개만 모델에 전달합니다.
 
-### POST /v1/roadmap
+### POST /roadmaps
 
 백엔드의 `POST /api/chat/sessions/{sessionId}/roadmaps` 에 대응합니다.
 
@@ -143,7 +143,7 @@ pytest
 `orderNo` 는 항상 1부터 1씩 증가하도록 서버에서 다시 매깁니다. `targetDate` 는 오늘 이후
 날짜만 남기고, 앞 스텝보다 이른 날짜는 `null` 로 정리합니다.
 
-### POST /v1/recommend
+### POST /recommendations
 
 메인 페이지에서 추천 자격증 카드를 띄울 때 씁니다. 대화 없이 사용자 프로필만 받습니다.
 
@@ -206,8 +206,8 @@ app/
 │   ├── middleware.py        요청 로깅 (처리 시간 포함)
 │   └── v1/
 │       ├── router.py        v1 라우터 집약
-│       ├── chat.py          POST /v1/chat
-│       └── roadmap.py       POST /v1/roadmap
+│       ├── chat.py          POST /chat
+│       └── roadmap.py       POST /roadmaps
 ├── schemas/                 요청/응답 스키마 (camelCase 계약)
 │   ├── base.py              CamelModel
 │   ├── chat.py
@@ -283,6 +283,6 @@ batch/
 ## 앞으로 할 일
 
 - [ ] 백엔드 ↔ AI 서버 간 인증 (내부 토큰 헤더)
-- [ ] 응답 스트리밍 (`POST /v1/chat/stream`)
+- [ ] 응답 스트리밍 (`POST /chat/stream`)
 - [ ] 시험 일정·출제 기준 RAG 연동
 - [ ] Dockerfile 및 배포 설정

@@ -1,6 +1,6 @@
 """X-API-Key 인증 테스트.
 
-/v1 아래는 키가 있어야 하고, 상태 확인 엔드포인트는 키 없이도 열려 있어야 한다.
+AI 기능 엔드포인트는 키가 있어야 하고, 상태 확인 엔드포인트는 키 없이도 열려 있어야 한다.
 """
 
 from fastapi.testclient import TestClient
@@ -29,7 +29,7 @@ def test_v1_rejects_missing_key():
     original = settings.api_key
     settings.api_key = "test-key"
     try:
-        response = client.post("/v1/chat", json=BODY)
+        response = client.post("/chat", json=BODY)
         assert response.status_code == 401
         assert response.json()["code"] == "UNAUTHORIZED"
     finally:
@@ -40,7 +40,7 @@ def test_v1_rejects_wrong_key():
     original = settings.api_key
     settings.api_key = "test-key"
     try:
-        response = client.post("/v1/chat", json=BODY, headers=_with_key("wrong-key"))
+        response = client.post("/chat", json=BODY, headers=_with_key("wrong-key"))
         assert response.status_code == 401
     finally:
         settings.api_key = original
@@ -51,7 +51,7 @@ def test_v1_passes_auth_with_correct_key():
     original = settings.api_key
     settings.api_key = "test-key"
     try:
-        response = client.post("/v1/chat", json=BODY, headers=_with_key("test-key"))
+        response = client.post("/chat", json=BODY, headers=_with_key("test-key"))
         assert response.status_code != 401
     finally:
         settings.api_key = original
@@ -62,7 +62,7 @@ def test_v1_refuses_when_server_key_not_configured():
     original = settings.api_key
     settings.api_key = ""
     try:
-        response = client.post("/v1/chat", json=BODY, headers=_with_key("anything"))
+        response = client.post("/chat", json=BODY, headers=_with_key("anything"))
         assert response.status_code == 500
         assert response.json()["code"] == "API_KEY_NOT_CONFIGURED"
     finally:

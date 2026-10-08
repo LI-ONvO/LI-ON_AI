@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from app.core.config import settings
 from app.main import app
 
-# /v1 은 X-API-Key 를 요구한다. 인증 자체를 검증하는 tests/test_api_key.py 를 빼면
+# AI 기능 엔드포인트는 X-API-Key 를 요구한다. 인증 자체를 검증하는 tests/test_api_key.py 를 빼면
 # 나머지 테스트의 관심사가 아니므로, 여기서 고정 키를 심고 클라이언트가 항상 붙여 보내게 한다.
 TEST_API_KEY = "test-api-key"
 

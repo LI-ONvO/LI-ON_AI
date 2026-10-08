@@ -5,10 +5,11 @@
 엔드포인트
   GET  /health       라이브니스 체크
   GET  /ready        레디니스 체크 (설정 완비 여부)
-  POST /v1/chat      대화 맥락 기반 AI 응답 생성
-  POST /v1/roadmap   대화 맥락 기반 구조화 로드맵 생성
+  POST /chat              대화 맥락 기반 AI 응답 생성
+  POST /roadmaps          대화 맥락 기반 구조화 로드맵 생성
+  POST /recommendations   사용자 프로필 기반 자격증 추천
 
-/v1 아래는 X-API-Key 헤더가 있어야 한다. 상태 확인용 엔드포인트는 인증 없이 연다.
+AI 기능 엔드포인트는 X-API-Key 헤더가 있어야 한다. 상태 확인용 엔드포인트는 인증 없이 연다.
 """
 
 from collections.abc import AsyncIterator
@@ -58,7 +59,7 @@ def create_app() -> FastAPI:
 
     # /health 와 /ready 는 인증 없이 둔다. 배포 플랫폼과 백엔드가 서버 상태를 확인하는 통로다.
     app.include_router(health.router)
-    app.include_router(api_router, prefix="/v1", dependencies=[Depends(require_api_key)])
+    app.include_router(api_router, dependencies=[Depends(require_api_key)])
 
     return app
 

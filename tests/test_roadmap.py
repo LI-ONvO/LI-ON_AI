@@ -47,7 +47,7 @@ def test_roadmap_returns_camel_case_fields(client, mock_chain):
         )
     )
 
-    res = client.post("/v1/roadmap", json={"sessionId": 1, "jmCd": "1320", "history": []})
+    res = client.post("/roadmaps", json={"sessionId": 1, "jmCd": "1320", "history": []})
 
     assert res.status_code == 200
     body = res.json()
@@ -63,7 +63,7 @@ def test_roadmap_returns_camel_case_fields(client, mock_chain):
 def test_client_title_overrides_ai_title(client, mock_chain):
     mock_chain(return_value=make_draft(step(1), title="AI가 만든 제목"))
 
-    res = client.post("/v1/roadmap", json={"sessionId": 1, "jmCd": "1320", "title": "3개월 속성 플랜"})
+    res = client.post("/roadmaps", json={"sessionId": 1, "jmCd": "1320", "title": "3개월 속성 플랜"})
 
     assert res.status_code == 200
     assert res.json()["title"] == "3개월 속성 플랜"
@@ -72,7 +72,7 @@ def test_client_title_overrides_ai_title(client, mock_chain):
 def test_ai_title_used_when_not_given(client, mock_chain):
     mock_chain(return_value=make_draft(step(1), title="AI가 만든 제목"))
 
-    res = client.post("/v1/roadmap", json={"sessionId": 1, "jmCd": "1320"})
+    res = client.post("/roadmaps", json={"sessionId": 1, "jmCd": "1320"})
 
     assert res.status_code == 200
     assert res.json()["title"] == "AI가 만든 제목"
@@ -81,7 +81,7 @@ def test_ai_title_used_when_not_given(client, mock_chain):
 def test_roadmap_without_steps_maps_to_502(client, mock_chain):
     mock_chain(side_effect=LLMOutputError())
 
-    res = client.post("/v1/roadmap", json={"sessionId": 1, "jmCd": "1320"})
+    res = client.post("/roadmaps", json={"sessionId": 1, "jmCd": "1320"})
 
     assert res.status_code == 502
     assert res.json()["code"] == "LLM_OUTPUT_INVALID"
@@ -90,14 +90,14 @@ def test_roadmap_without_steps_maps_to_502(client, mock_chain):
 def test_roadmap_timeout_maps_to_504(client, mock_chain):
     mock_chain(side_effect=LLMTimeoutError())
 
-    res = client.post("/v1/roadmap", json={"sessionId": 1, "jmCd": "1320"})
+    res = client.post("/roadmaps", json={"sessionId": 1, "jmCd": "1320"})
 
     assert res.status_code == 504
     assert res.json()["code"] == "LLM_TIMEOUT"
 
 
 def test_roadmap_rejects_missing_session_id(client):
-    res = client.post("/v1/roadmap", json={})
+    res = client.post("/roadmaps", json={})
 
     assert res.status_code == 422
 

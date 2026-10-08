@@ -77,7 +77,7 @@ def test_truncates_to_requested_size():
 def test_recommend_returns_items(client, mock_chain):
     mock_chain(return_value=([_draft("1320", "정보기술 기초가 됩니다.")], VALID))
 
-    res = client.post("/v1/recommend", json=_payload())
+    res = client.post("/recommendations", json=_payload())
 
     assert res.status_code == 200
     assert res.json() == {"items": [{"jmCd": "1320", "reason": "정보기술 기초가 됩니다."}]}
@@ -87,7 +87,7 @@ def test_recommend_size_is_capped(client, mock_chain):
     """모델이 요청보다 많이 골라도 size 개까지만 내보낸다."""
     mock_chain(return_value=([_draft("1320"), _draft("2290"), _draft("6892")], VALID))
 
-    res = client.post("/v1/recommend", json=_payload(size=2))
+    res = client.post("/recommendations", json=_payload(size=2))
 
     assert res.status_code == 200
     assert len(res.json()["items"]) == 2
@@ -97,7 +97,7 @@ def test_all_invalid_codes_maps_to_502(client, mock_chain):
     """남는 추천이 하나도 없으면 빈 목록 대신 오류로 알린다."""
     mock_chain(return_value=([_draft("9999"), _draft("8888")], VALID))
 
-    res = client.post("/v1/recommend", json=_payload())
+    res = client.post("/recommendations", json=_payload())
 
     assert res.status_code == 502
     assert res.json()["code"] == "LLM_OUTPUT_INVALID"
@@ -106,12 +106,12 @@ def test_all_invalid_codes_maps_to_502(client, mock_chain):
 def test_recommend_timeout_maps_to_504(client, mock_chain):
     mock_chain(side_effect=LLMTimeoutError())
 
-    res = client.post("/v1/recommend", json=_payload())
+    res = client.post("/recommendations", json=_payload())
 
     assert res.status_code == 504
 
 
 def test_size_out_of_range_is_rejected(client):
-    res = client.post("/v1/recommend", json=_payload(size=0))
+    res = client.post("/recommendations", json=_payload(size=0))
 
     assert res.status_code == 422
