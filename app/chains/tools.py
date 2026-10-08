@@ -37,7 +37,13 @@ async def _resolve(query: str) -> dict:
     resolved = await resolve_certification(query)
     matches = resolved["matches"]
     exam_names = {m["jmNm"] for m in matches if m["qualGbNm"] == _EXAM_BASED}
-    kept = [m for m in matches if not (m["qualGbNm"] == _COURSE_BASED and m["jmNm"] in exam_names)]
+    code = query.strip()
+    kept = [
+        m for m in matches
+        # 종목코드로 콕 집어 물었으면(사용자가 과정평가형을 골랐을 때) 숨기지 않는다.
+        if m["jmCd"] == code
+        or not (m["qualGbNm"] == _COURSE_BASED and m["jmNm"] in exam_names)
+    ]
     return {"total": resolved["total"] - (len(matches) - len(kept)), "matches": kept}
 
 TOOL_SPECS = [

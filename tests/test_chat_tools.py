@@ -179,3 +179,16 @@ def test_total_is_reduced_by_hidden_twins(monkeypatch):
     result = asyncio.run(tools._resolve("기능사"))
 
     assert result["total"] == 39
+
+
+def test_course_based_kept_when_asked_by_code(monkeypatch):
+    """사용자가 과정평가형(E921)을 골라 종목코드로 물으면 그 종목을 그대로 돌려준다."""
+    import asyncio
+    from app.chains import tools
+    monkeypatch.setattr(tools, "resolve_certification", _resolved(
+        ("6921", "프로그래밍기능사", "국가기술자격"),
+        ("E921", "프로그래밍기능사", "과정평가형자격"),
+    ))
+    result = asyncio.run(tools._resolve("E921"))
+
+    assert "E921" in [m["jmCd"] for m in result["matches"]]
