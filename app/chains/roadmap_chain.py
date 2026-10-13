@@ -20,6 +20,7 @@ from app.core.logging import get_logger
 from app.prompts import render_prompt
 from app.repositories.certifications import fetch_exam_schedules, get_certification
 from app.schemas.chat import ChatMessage
+from app.schemas.roadmap import RoadmapUser
 
 logger = get_logger(__name__)
 
@@ -45,6 +46,16 @@ class RoadmapDraft(BaseModel):
 
     title: str = Field(description="로드맵 제목. 목표와 기간이 드러나게. 예: '정보처리기능사 3개월 속성 플랜'")
     steps: list[RoadmapStepDraft] = Field(description="시간 순서대로 정렬된 학습 스텝 목록")
+
+
+def _format_user(user: RoadmapUser | None) -> str:
+    """온보딩 답변을 프롬프트에 넣는다. 하루 학습 시간은 스텝 분량을 정하는 근거다."""
+    if user is None:
+        return ""
+    lines = [f"- {a.title}: {', '.join(a.values)}" for a in user.onboarding if a.values]
+    if not lines:
+        return ""
+    return "\n".join(["[사용자 정보]", *lines])
 
 
 def _build_instruction(title: str | None) -> str:
@@ -142,6 +153,7 @@ async def run_roadmap_chain(
     history: Sequence[ChatMessage],
     jm_cd: str,
     title: str | None = None,
+    user: RoadmapUser | None = None,
 ) -> RoadmapDraft:
     """선택된 자격증과 대화 맥락으로부터 구조화된 로드맵 초안을 만든다."""
     system_prompt = render_prompt(
@@ -152,6 +164,9 @@ async def run_roadmap_chain(
     )
 
     instruction = _build_instruction(title)
+    user_context = _format_user(user)
+    if user_context:
+        instruction = f"{user_context}\n\n{instruction}"
     exam_context = await _load_exam_context(jm_cd)
     if exam_context:
         instruction = f"{exam_context}\n\n{instruction}"

@@ -86,14 +86,17 @@ def normalize_steps(draft: RoadmapDraft, today: date | None = None) -> list[Road
 
 async def generate_roadmap(payload: RoadmapRequest) -> RoadmapResponse:
     logger.info(
-        "로드맵 생성 시작 | sessionId=%s jmCd=%s historyLen=%d titleGiven=%s",
+        "로드맵 생성 시작 | sessionId=%s jmCd=%s historyLen=%d titleGiven=%s today=%s",
         payload.session_id,
-        payload.jm_cd,
+        payload.target_jm_cd,
         len(payload.history),
         payload.title is not None,
+        payload.today,
     )
 
-    draft = await run_roadmap_chain(payload.history, payload.jm_cd, payload.title)
+    draft = await run_roadmap_chain(
+        payload.history, payload.target_jm_cd, payload.title, user=payload.user
+    )
     steps = normalize_steps(draft)
 
     if not steps:

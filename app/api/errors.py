@@ -44,7 +44,12 @@ def register_exception_handlers(app: FastAPI) -> None:
             422,
             "INVALID_REQUEST",
             "요청 형식이 올바르지 않습니다.",
-            detail=exc.errors(),
+            # 원본 오류에는 예외 객체(ctx)와 입력값(input)이 섞여 있다. 예외 객체는 직렬화되지 않고
+            # 입력값에는 사용자 정보가 있을 수 있어, 위치·메시지·종류만 돌려준다.
+            detail=[
+                {"loc": list(e.get("loc", ())), "msg": e.get("msg"), "type": e.get("type")}
+                for e in exc.errors()
+            ],
         )
 
     @app.exception_handler(StarletteHTTPException)

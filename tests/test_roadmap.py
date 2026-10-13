@@ -173,3 +173,52 @@ def test_null_target_dates_are_allowed():
 
     assert all(s.target_date is None for s in steps)
     assert [s.order_no for s in steps] == [1, 2, 3]
+
+
+# --------------------------------------------------------------------------
+# 팀 명세서 요청 형식
+# --------------------------------------------------------------------------
+
+SPEC_PAYLOAD = {
+    "sessionId": 1,
+    "today": "2026-10-13",
+    "user": {
+        "nickname": "건",
+        "onboarding": [{"title": "하루 학습 가능 시간", "values": ["1~2시간"]}],
+    },
+    "certificate": {
+        "jmCd": "6921",
+        "name": "프로그래밍기능사",
+        "category": None,
+        "description": None,
+        "examSchedules": [{"implYy": 2026, "implSeq": "04", "docRegStartDt": "2026-08-24"}],
+    },
+    "messages": [
+        {"sender": "USER", "content": "3개월 안에 따고 싶어요"},
+        {"sender": "AI", "content": "좋아요"},
+    ],
+    "title": None,
+}
+
+
+def test_accepts_team_spec_request(client, mock_chain):
+    """명세서 형식(certificate 객체, messages)으로 와도 받아야 한다."""
+    mock = mock_chain(return_value=make_draft(step(1)))
+
+    res = client.post("/roadmaps", json=SPEC_PAYLOAD)
+
+    assert res.status_code == 200
+    history, jm_cd, title = mock.call_args.args
+    assert jm_cd == "6921"
+    # messages 를 history 로 받지 못하면 오류 없이 대화가 빠진다.
+    assert [m.content for m in history] == ["3개월 안에 따고 싶어요", "좋아요"]
+    assert mock.call_args.kwargs["user"].onboarding[0].values == ["1~2시간"]
+
+
+def test_rejects_request_without_certificate(client, mock_chain):
+    mock_chain(return_value=make_draft(step(1)))
+    payload = {k: v for k, v in SPEC_PAYLOAD.items() if k != "certificate"}
+
+    res = client.post("/roadmaps", json=payload)
+
+    assert res.status_code == 422
