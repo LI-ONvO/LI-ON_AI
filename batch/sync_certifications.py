@@ -290,6 +290,30 @@ def _fetch_schedules_for(jm_cd: str, year: int, label: str) -> list[ET.Element]:
     return items
 
 
+def drop_extra_registrations(rows: list[dict]) -> list[dict]:
+    """같은 회차가 여러 줄이면 필기 원서접수가 가장 먼저 시작하는 줄만 남긴다.
+
+    국가기술자격은 원본에 한 회차가 두 줄씩 온다. 시험일·실기 일정은 같고 필기 접수
+    기간만 다르다(프로그래밍기능사 2026 제4회: 08-24~08-27 / 09-10~09-11). 늦은 쪽은
+    시험 직전 이틀짜리 빈자리 추가접수로 보이는데, 원본에 구분 표시가 없다.
+    둘 다 넣으면 챗봇·앱에 "제4회"가 두 번 나오므로, 팀에서 정기 접수만 남기기로 했다.
+
+    제0회(필기 없이 실기만)는 회차 번호가 달라 영향받지 않는다.
+    """
+    kept: dict[str, dict] = {}
+    for row in rows:
+        seq = row["impl_seq"]
+        current = kept.get(seq)
+        start = row["doc_reg_start_dt"]
+        if current is None:
+            kept[seq] = row
+        elif start is not None and (
+            current["doc_reg_start_dt"] is None or start < current["doc_reg_start_dt"]
+        ):
+            kept[seq] = row
+    return list(kept.values())
+
+
 def _checkpoint_path(year: int) -> str:
     return os.path.join(os.path.dirname(__file__), f".schedule_progress_{year}.txt")
 
@@ -325,11 +349,13 @@ def sync_exam_schedules(conn, year: int) -> int:
     with conn.cursor() as cursor:
         cursor.execute(
             """
-            SELECT jm_cd FROM certification
+            SELECT jm_cd, qual_gb_cd FROM certification
             ORDER BY FIELD(qual_gb_cd, 'T', 'S', 'C', 'W'), jm_cd
             """
         )
-        jm_cds = [row["jm_cd"] for row in cursor.fetchall()]
+        certs = cursor.fetchall()
+    jm_cds = [row["jm_cd"] for row in certs]
+    qual_gb = {row["jm_cd"]: row["qual_gb_cd"] for row in certs}
 
     done = _load_checkpoint(year)
     if done:
@@ -384,6 +410,10 @@ def sync_exam_schedules(conn, year: int) -> int:
                     )
                     for item in items
                 ]
+                # 빈자리 추가접수 줄은 국가기술자격에서만 확인했다. 다른 자격구분은 한 회차가
+                # 여러 줄인 이유가 다를 수 있어 건드리지 않는다.
+                if qual_gb.get(jm_cd) == "T":
+                    rows = drop_extra_registrations(rows)
                 saved += upsert(conn, "exam_schedule", SCHEDULE_FIELDS, rows, key)
 
                 # DB 저장이 끝난 뒤에 기록해야, 저장 직전에 죽었을 때 이 종목을 다시 받는다.

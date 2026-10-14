@@ -4,6 +4,8 @@
 모든 오류 응답은 {"code": ..., "message": ..., "detail": ...} 형태다.
 """
 
+import json
+
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -15,6 +17,23 @@ from app.core.logging import get_logger
 from app.schemas.error import ErrorResponse
 
 logger = get_logger(__name__)
+
+
+def _shape(value: object, depth: int = 0) -> object:
+    """JSON 값의 구조만 남긴다. 키 이름과 타입은 보이고 실제 값(대화 내용 등)은 지운다.
+
+    형식 오류 원인을 찾으려면 무엇이 어떤 이름으로 왔는지가 필요하지만,
+    본문을 그대로 로그에 남기면 사용자 대화가 로그에 쌓인다.
+    """
+    if depth > 4:
+        return "..."
+    if isinstance(value, dict):
+        return {k: _shape(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_shape(value[0], depth + 1), f"x{len(value)}"] if value else []
+    if value is None:
+        return None
+    return type(value).__name__
 
 
 def _error_response(status_code: int, code: str, message: str, detail: object = None) -> JSONResponse:
@@ -40,6 +59,11 @@ def register_exception_handlers(app: FastAPI) -> None:
             f"{'.'.join(str(p) for p in e.get('loc', ()))}: {e.get('type')}" for e in exc.errors()
         ]
         logger.warning("요청 형식 오류 | %s %s | %s", request.method, request.url.path, "; ".join(problems))
+        try:
+            body_shape = _shape(json.loads(await request.body() or b"null"))
+        except ValueError:
+            body_shape = "JSON 아님"
+        logger.warning("요청 본문 구조 | %s", json.dumps(body_shape, ensure_ascii=False))
         return _error_response(
             422,
             "INVALID_REQUEST",
