@@ -13,13 +13,14 @@ from datetime import date
 from pydantic import BaseModel, Field
 
 from app.chains.base import build_messages
+from app.chains.tools import _resolve
 from app.core.config import settings
-from app.core.exceptions import LLMOutputError
+from app.core.exceptions import LLMOutputError, RoadmapTargetUnknownError
 from app.core.llm import get_chat_model, llm_call_guard
 from app.core.logging import get_logger
 from app.prompts import render_prompt
 from app.repositories.certifications import fetch_exam_schedules, get_certification
-from app.schemas.chat import ChatMessage
+from app.schemas.chat import ChatMessage, Sender
 from app.schemas.roadmap import RoadmapUser
 
 logger = get_logger(__name__)
@@ -149,13 +150,69 @@ async def _load_exam_context(jm_cd: str) -> str | None:
     return _format_schedules(target["jmNm"], schedules)
 
 
+class TargetCertification(BaseModel):
+    """대화에서 뽑은 목표 자격증."""
+
+    name: str | None = Field(
+        description="사용자가 취득하려는 자격증의 정확한 종목명. 정해지지 않았으면 null"
+    )
+
+
+_TARGET_PROMPT = """아래 대화에서 사용자가 이번에 취득하려고 하는 자격증 하나의 종목명을 고르세요.
+- 여러 자격증이 나왔으면 사용자가 마지막에 목표로 정한 것을 고릅니다.
+- AI가 옛 이름을 바로잡았다면(예: 정보처리기능사 → 프로그래밍기능사) 바로잡은 이름을 씁니다.
+- 대화에 나온 이름만 씁니다. 대화에 없는 자격증을 짐작해서 넣지 않습니다.
+- 목표 자격증이 정해지지 않았으면 null 로 둡니다."""
+
+
+async def infer_jm_cd(history: Sequence[ChatMessage]) -> str | None:
+    """자격증을 고르지 않고 대화만 한 세션에서 목표 자격증의 종목코드를 찾는다.
+
+    이름을 뽑는 것만 모델에게 맡기고, 종목코드는 DB에서 찾는다. 모델에게 코드를 바로
+    쓰게 하면 그럴듯한 코드를 지어낸다. 하나로 정해지지 않으면 None 을 돌려주고,
+    호출한 쪽은 대화 내용만으로 로드맵을 만든다(틀린 자격증의 일정을 쓰는 것보다 낫다).
+
+    대화에 목표 자격증이 아예 없으면 만들 근거가 없어 RoadmapTargetUnknownError 를 낸다.
+    (DB에 없는 민간자격처럼 이름은 있는데 코드를 못 찾는 경우는 대화만으로 만든다.)
+    """
+    if not any(m.sender == Sender.USER for m in history):
+        raise RoadmapTargetUnknownError()
+
+    model = get_chat_model(temperature=0).with_structured_output(TargetCertification)
+    async with llm_call_guard("roadmap-target"):
+        target = await model.ainvoke(build_messages(_TARGET_PROMPT, history))
+
+    name = (target.name or "").strip() if target else ""
+    if not name:
+        logger.info("대화에서 목표 자격증을 찾지 못했습니다.")
+        raise RoadmapTargetUnknownError()
+
+    # 챗봇 도구와 같은 규칙으로 찾는다(같은 이름의 과정평가형은 뺀다).
+    matches = (await _resolve(name))["matches"]
+    compact = name.replace(" ", "")
+    exact = [m for m in matches if m["jmNm"].replace(" ", "") == compact]
+    candidates = exact or matches
+    if len(candidates) != 1:
+        logger.info("목표 자격증 '%s'을(를) 하나로 정하지 못했습니다. | 후보 %d개", name, len(candidates))
+        return None
+
+    logger.info("대화에서 목표 자격증을 찾았습니다. | %s → %s", name, candidates[0]["jmCd"])
+    return candidates[0]["jmCd"]
+
+
 async def run_roadmap_chain(
     history: Sequence[ChatMessage],
-    jm_cd: str,
+    jm_cd: str | None,
     title: str | None = None,
     user: RoadmapUser | None = None,
 ) -> RoadmapDraft:
-    """선택된 자격증과 대화 맥락으로부터 구조화된 로드맵 초안을 만든다."""
+    """선택된 자격증과 대화 맥락으로부터 구조화된 로드맵 초안을 만든다.
+
+    자격증을 고르지 않고 대화만 하다 로드맵을 만들면 jm_cd 가 없다. 그때는 대화에서 찾는다.
+    """
+    if not jm_cd:
+        jm_cd = await infer_jm_cd(history)
+
     system_prompt = render_prompt(
         "roadmap_system",
         today=date.today().isoformat(),
@@ -167,7 +224,7 @@ async def run_roadmap_chain(
     user_context = _format_user(user)
     if user_context:
         instruction = f"{user_context}\n\n{instruction}"
-    exam_context = await _load_exam_context(jm_cd)
+    exam_context = await _load_exam_context(jm_cd) if jm_cd else None
     if exam_context:
         instruction = f"{exam_context}\n\n{instruction}"
     else:

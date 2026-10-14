@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.chains.roadmap_chain import RoadmapDraft, RoadmapStepDraft
-from app.core.exceptions import LLMOutputError, LLMTimeoutError
+from app.core.exceptions import LLMOutputError, LLMTimeoutError, RoadmapTargetUnknownError
 from app.services.roadmap_service import normalize_steps
 
 TODAY = date(2026, 8, 6)
@@ -215,10 +215,88 @@ def test_accepts_team_spec_request(client, mock_chain):
     assert mock.call_args.kwargs["user"].onboarding[0].values == ["1~2시간"]
 
 
-def test_rejects_request_without_certificate(client, mock_chain):
-    mock_chain(return_value=make_draft(step(1)))
-    payload = {k: v for k, v in SPEC_PAYLOAD.items() if k != "certificate"}
+def test_null_certificate_falls_back_to_conversation(client, mock_chain):
+    """자격증을 고르지 않고 대화만 한 세션은 certificate 가 null 이다. 대화에서 찾도록 넘긴다."""
+    mock = mock_chain(return_value=make_draft(step(1)))
 
-    res = client.post("/roadmaps", json=payload)
+    res = client.post("/roadmaps", json={**SPEC_PAYLOAD, "certificate": None})
+
+    assert res.status_code == 200
+    assert mock.call_args.args[1] is None
+
+
+def test_rejects_request_without_certificate_and_messages(client, mock_chain):
+    mock_chain(return_value=make_draft(step(1)))
+
+    res = client.post("/roadmaps", json={**SPEC_PAYLOAD, "certificate": None, "messages": []})
 
     assert res.status_code == 422
+
+
+# --------------------------------------------------------------------------
+# 대화에서 목표 자격증 찾기
+# --------------------------------------------------------------------------
+
+from app.chains import roadmap_chain  # noqa: E402
+from app.chains.roadmap_chain import TargetCertification, infer_jm_cd  # noqa: E402
+from app.schemas.chat import ChatMessage  # noqa: E402
+
+
+class _NameModel:
+    def __init__(self, name):
+        self.name = name
+
+    def with_structured_output(self, _schema):
+        return self
+
+    async def ainvoke(self, _messages):
+        return TargetCertification(name=self.name)
+
+
+def _infer(monkeypatch, name, matches):
+    import asyncio
+
+    monkeypatch.setattr(roadmap_chain, "get_chat_model", lambda **_: _NameModel(name))
+    monkeypatch.setattr(
+        roadmap_chain, "_resolve", AsyncMock(return_value={"total": len(matches), "matches": matches})
+    )
+    history = [ChatMessage(sender="USER", content="프로그래밍기능사 따고 싶어요")]
+    return asyncio.run(infer_jm_cd(history))
+
+
+PROG = {"jmCd": "6921", "jmNm": "프로그래밍기능사", "qualGbNm": "국가기술자격"}
+
+
+def test_infers_code_from_conversation(monkeypatch):
+    assert _infer(monkeypatch, "프로그래밍기능사", [PROG]) == "6921"
+
+
+def test_prefers_exact_name_among_several(monkeypatch):
+    """'정보처리기사'로 찾으면 정보처리산업기사 등도 걸린다. 이름이 정확히 같은 것을 쓴다."""
+    matches = [
+        {"jmCd": "1320", "jmNm": "정보처리기사", "qualGbNm": "국가기술자격"},
+        {"jmCd": "2290", "jmNm": "정보처리산업기사", "qualGbNm": "국가기술자격"},
+    ]
+    assert _infer(monkeypatch, "정보처리기사", matches) == "1320"
+
+
+def test_gives_up_when_ambiguous_or_missing(monkeypatch):
+    """하나로 정해지지 않으면 틀린 자격증 일정을 쓰지 않고 None 을 준다."""
+    many = [{"jmCd": c, "jmNm": f"{c}기능사", "qualGbNm": "국가기술자격"} for c in ("1", "2")]
+    assert _infer(monkeypatch, "기능사", many) is None
+    assert _infer(monkeypatch, "없는자격증", []) is None
+
+
+def test_no_target_in_conversation_is_reported(monkeypatch):
+    """대화에 목표 자격증이 없으면 서버 오류(502)가 아니라 전용 오류로 알린다."""
+    with pytest.raises(RoadmapTargetUnknownError):
+        _infer(monkeypatch, None, [PROG])
+
+
+def test_no_target_maps_to_422(client, mock_chain):
+    mock_chain(side_effect=RoadmapTargetUnknownError())
+
+    res = client.post("/roadmaps", json={**SPEC_PAYLOAD, "certificate": None})
+
+    assert res.status_code == 422
+    assert res.json()["code"] == "ROADMAP_TARGET_UNKNOWN"

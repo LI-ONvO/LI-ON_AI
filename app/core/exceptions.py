@@ -48,3 +48,15 @@ class ConfigurationError(AIServerError):
     status_code = 500
     code = "CONFIGURATION_ERROR"
     message = "AI 서버 설정이 올바르지 않습니다."
+
+
+class RoadmapTargetUnknownError(AIServerError):
+    """자격증을 고르지 않았고 대화에서도 목표 자격증을 찾지 못한 경우.
+
+    서버 오류가 아니라 사용자가 아직 목표를 정하지 않은 상황이다. 502로 내보내면 앱이
+    "서버 오류"로 보여 주므로, 목표를 먼저 정하라고 안내할 수 있게 따로 구분한다.
+    """
+
+    status_code = 422
+    code = "ROADMAP_TARGET_UNKNOWN"
+    message = "로드맵을 만들 목표 자격증을 대화에서 찾지 못했습니다. 먼저 자격증을 정해 주세요."

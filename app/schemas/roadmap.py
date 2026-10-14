@@ -46,7 +46,11 @@ class RoadmapRequest(CamelModel):
     )
     user: RoadmapUser | None = Field(default=None, description="사용자 정보")
     certificate: RoadmapCertificate | None = Field(
-        default=None, description="사용자가 고른 자격증. 이 자격증의 실제 시험일정을 근거로 만든다."
+        default=None,
+        description=(
+            "사용자가 고른 자격증. 이 자격증의 실제 시험일정을 근거로 만든다. "
+            "자격증을 고르지 않고 대화만 했으면 null 이고, 대화에서 목표 자격증을 찾는다."
+        ),
     )
     jm_cd: str | None = Field(default=None, description="(초기 형식) 자격증 종목코드")
     history: list[ChatMessage] = Field(
@@ -62,9 +66,11 @@ class RoadmapRequest(CamelModel):
     )
 
     @model_validator(mode="after")
-    def _require_certificate(self) -> "RoadmapRequest":
-        if not self.target_jm_cd:
-            raise ValueError("certificate.jmCd 가 필요합니다.")
+    def _require_basis(self) -> "RoadmapRequest":
+        # 자격증을 고르지 않고 대화만 한 세션은 certificate 가 null 이다. 그때는 대화에서
+        # 목표 자격증을 찾는다. 둘 다 없으면 무엇으로 로드맵을 만들지 근거가 없다.
+        if not self.target_jm_cd and not self.history:
+            raise ValueError("certificate 또는 messages 중 하나는 있어야 합니다.")
         return self
 
     @property
