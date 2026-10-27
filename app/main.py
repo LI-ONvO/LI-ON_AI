@@ -8,6 +8,7 @@
   POST /chat              대화 맥락 기반 AI 응답 생성
   POST /roadmaps          대화 맥락 기반 구조화 로드맵 생성
   POST /recommendations   사용자 프로필 기반 자격증 추천
+  POST /resources/recommendations  자격증 학습 자료(영상·책·웹·블로그) 추천
 
 AI 기능 엔드포인트는 X-API-Key 헤더가 있어야 한다. 상태 확인용 엔드포인트는 인증 없이 연다.
 """

@@ -48,6 +48,16 @@ class Settings(BaseSettings):
     # 챗봇 한 번에 최대 4번 부르므로 길게 잡으면 전체 응답이 늘어진다.
     backend_timeout_seconds: float = 10.0
 
+    # --- 학습 자료 검색 (/resources/recommendations) ---
+    # 검색 결과는 각 API 약관상 외부 LLM 으로 보낼 수 없어(카카오), 가공 없이 보여줘야 한다(네이버).
+    # 그래서 이 기능은 AI 를 쓰지 않고 코드 규칙으로 고른다.
+    youtube_api_key: str = ""
+    kakao_rest_api_key: str = ""
+    naver_client_id: str = ""      # NAVER API HUB (네이버 클라우드) 발급 값
+    naver_client_secret: str = ""
+    # 외부 검색 하나가 늦어도 전체 응답이 늘어지지 않게 짧게 잡는다.
+    resource_timeout_seconds: float = 8.0
+
     # 한 번에 모델에 넘길 자격증 후보 수. 많으면 프롬프트가 커지고 적으면 고를 폭이 없다.
     max_candidates: int = 12
     # 설명 텍스트는 항목당 수천 자까지 있어서 잘라 쓴다.
