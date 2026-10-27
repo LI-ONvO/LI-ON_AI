@@ -89,7 +89,25 @@ class ResourceItem(CamelModel):
     blog: BlogInfo | None = None
 
 
+class UnavailableReason(str, Enum):
+    QUOTA_EXCEEDED = "QUOTA_EXCEEDED"  # 외부 API 호출 한도를 다 씀. 시간이 지나면 풀린다
+    NOT_CONFIGURED = "NOT_CONFIGURED"  # AI 서버에 그 API 키가 없음
+    ERROR = "ERROR"                    # 그 외 실패(외부 API 장애, 시간 초과 등)
+
+
+class UnavailableSource(CamelModel):
+    type: ResourceType
+    reason: UnavailableReason
+
+
 class ResourceResponse(CamelModel):
     items: list[ResourceItem] = Field(
         description="실제 접근 가능한 자료만. 조건에 맞는 자료가 부족하면 size 보다 적을 수 있다."
+    )
+    unavailable: list[UnavailableSource] = Field(
+        default_factory=list,
+        description=(
+            "이번에 검색하지 못한 자료 종류와 이유. 비어 있으면 모두 정상. "
+            "items 에 어떤 종류가 없을 때 '검색 결과가 없음'인지 '한도 초과'인지 구분하는 데 쓴다."
+        ),
     )

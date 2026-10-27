@@ -15,7 +15,7 @@ AI 를 쓰지 않는 이유 (2026-10 확인):
 import html
 import re
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 import httpx
@@ -34,6 +34,78 @@ NAVER_SEARCH_URL = "https://naverapihub.apigw.ntruss.com/search/v1/{kind}"
 
 class SourceUnavailable(Exception):
     """한 출처의 검색이 실패했다. 다른 출처 결과는 그대로 쓴다."""
+
+
+class SourceNotConfigured(SourceUnavailable):
+    """이 출처의 API 키가 설정되지 않았다."""
+
+
+class SourceQuotaExceeded(SourceUnavailable):
+    """호출 한도를 다 썼다. 풀릴 때까지 그 출처는 부르지 않는다."""
+
+
+# 한도가 찬 출처를 다시 부르지 않을 시각(time.time 기준). 한도가 찬 뒤에도 매 요청마다 부르면
+# 실패할 줄 알면서 응답만 늦어진다. 인스턴스 메모리라 Vercel 인스턴스가 바뀌면 한 번 더 부르고
+# 다시 막힌 것을 알게 된다(그 한 번은 감수한다).
+_blocked_until: dict[str, float] = {}
+
+# 초당 호출 제한(429)은 잠깐 기다리면 풀린다.
+RATE_LIMIT_COOLDOWN_SECONDS = 60
+# 월 한도처럼 언제 풀릴지 알 수 없는 경우. 너무 길면 풀린 뒤에도 안 쓰고, 짧으면 헛호출이 는다.
+UNKNOWN_QUOTA_COOLDOWN_SECONDS = 60 * 60
+
+
+def _next_youtube_reset() -> float:
+    """YouTube 할당량은 매일 태평양 시간 자정에 초기화된다.
+
+    서버에 시간대 DB 가 없을 수 있어 태평양 표준시(UTC-8)로 계산한다. 서머타임 기간에는 실제
+    초기화(UTC 07:00)보다 한 시간 늦게(UTC 08:00) 다시 시도하게 된다. 한 시간 손해는 감수한다.
+    """
+    now = datetime.now(timezone.utc)
+    reset = now.replace(hour=8, minute=0, second=0, microsecond=0)
+    if reset <= now:
+        reset += timedelta(days=1)
+    return reset.timestamp()
+
+
+def is_blocked(source: str) -> bool:
+    return time.time() < _blocked_until.get(source, 0)
+
+
+def _block(source: str, until: float, reason: str) -> None:
+    _blocked_until[source] = until
+    logger.warning(
+        "%s 호출 한도 초과로 %s 까지 부르지 않습니다. | %s",
+        source, datetime.fromtimestamp(until, timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), reason,
+    )
+
+
+def _youtube_error_reasons(response: httpx.Response) -> set[str]:
+    try:
+        return {e.get("reason", "") for e in response.json()["error"]["errors"]}
+    except (ValueError, KeyError, TypeError):
+        return set()
+
+
+def _check_quota(source: str, response: httpx.Response) -> None:
+    """한도 초과 응답이면 막아 두고 SourceQuotaExceeded 를 낸다. 아니면 아무것도 하지 않는다."""
+    status = response.status_code
+    if source == "YOUTUBE" and status == 403:
+        reasons = _youtube_error_reasons(response)
+        if reasons & {"quotaExceeded", "dailyLimitExceeded"}:
+            _block(source, _next_youtube_reset(), ",".join(sorted(reasons)))
+            raise SourceQuotaExceeded(source)
+        if reasons & {"rateLimitExceeded", "userRateLimitExceeded"}:
+            _block(source, time.time() + RATE_LIMIT_COOLDOWN_SECONDS, ",".join(sorted(reasons)))
+            raise SourceQuotaExceeded(source)
+    if status == 429:
+        # NAVER API HUB 는 초당 한도(50 RPS)와 월 한도 모두 429 로 막는다. 카카오도 429.
+        # 본문으로 둘을 구분할 수 있으면 좋겠지만 형식이 정해져 있지 않아 문구로 본다.
+        body = response.text.lower()
+        monthly = any(word in body for word in ("month", "quota", "월", "한도"))
+        cooldown = UNKNOWN_QUOTA_COOLDOWN_SECONDS if monthly else RATE_LIMIT_COOLDOWN_SECONDS
+        _block(source, time.time() + cooldown, f"status=429 {response.text[:100]}")
+        raise SourceQuotaExceeded(source)
 
 
 # --------------------------------------------------------------------- 공통
@@ -73,13 +145,17 @@ def _mentions(title: str, cert_name: str) -> bool:
     return _compact(cert_name) in _compact(title)
 
 
-async def _get(url: str, *, params: dict, headers: dict, label: str) -> dict:
+async def _get(url: str, *, params: dict, headers: dict, label: str, source: str) -> dict:
+    """source 는 한도를 함께 쓰는 단위다. NAVER 웹문서·블로그는 한도를 같이 쓴다."""
+    if is_blocked(source):
+        raise SourceQuotaExceeded(source)
     try:
         async with httpx.AsyncClient(timeout=settings.resource_timeout_seconds) as client:
             response = await client.get(url, params=params, headers=headers)
     except httpx.HTTPError as exc:
         logger.warning("%s 검색 실패 | %s", label, type(exc).__name__)
         raise SourceUnavailable(label) from exc
+    _check_quota(source, response)
     if response.status_code != 200:
         # 본문에 키가 들어 있지 않지만, 길게 찍지 않는다.
         logger.warning("%s 검색 실패 | status=%s body=%s", label, response.status_code, response.text[:200])
@@ -120,7 +196,7 @@ def _format_duration(seconds: int) -> str:
 
 async def search_videos(cert_name: str, stage: str | None) -> list[ResourceItem]:
     if not settings.youtube_api_key:
-        raise SourceUnavailable("YouTube(키 없음)")
+        raise SourceNotConfigured("YOUTUBE")
 
     query = f"{cert_name} {stage or ''} 강의".replace("  ", " ")
     key = ("VIDEO", query)
@@ -137,6 +213,7 @@ async def search_videos(cert_name: str, stage: str | None) -> list[ResourceItem]
         },
         headers=headers,
         label="YouTube",
+        source="YOUTUBE",
     )
     ids = [it["id"]["videoId"] for it in found.get("items", []) if it.get("id", {}).get("videoId")]
     if not ids:
@@ -148,6 +225,7 @@ async def search_videos(cert_name: str, stage: str | None) -> list[ResourceItem]
         params={"part": "snippet,contentDetails,statistics,status", "id": ",".join(ids)},
         headers=headers,
         label="YouTube",
+        source="YOUTUBE",
     )
     by_id = {v["id"]: v for v in details.get("items", [])}
 
@@ -212,7 +290,7 @@ MAX_BOOK_AGE_DAYS = 3 * 365
 
 async def search_books(cert_name: str) -> list[ResourceItem]:
     if not settings.kakao_rest_api_key:
-        raise SourceUnavailable("카카오 책(키 없음)")
+        raise SourceNotConfigured("KAKAO")
 
     key = ("BOOK", cert_name)
     if (hit := _cached(key)) is not None:
@@ -223,6 +301,7 @@ async def search_books(cert_name: str) -> list[ResourceItem]:
         params={"query": cert_name, "target": "title", "size": 30, "sort": "accuracy"},
         headers={"Authorization": f"KakaoAK {settings.kakao_rest_api_key}"},
         label="카카오 책",
+        source="KAKAO",
     )
 
     today = date.today()
@@ -290,7 +369,7 @@ MAX_BLOG_AGE_DAYS = 2 * 365
 
 def _naver_headers() -> dict:
     if not settings.naver_client_id or not settings.naver_client_secret:
-        raise SourceUnavailable("NAVER(키 없음)")
+        raise SourceNotConfigured("NAVER")
     # NAVER API HUB 는 예전 개발자센터(X-Naver-Client-Id)와 헤더 이름이 다르다.
     return {
         "X-NCP-APIGW-API-KEY-ID": settings.naver_client_id,
@@ -313,6 +392,7 @@ async def search_web(cert_name: str) -> list[ResourceItem]:
         params={"query": cert_name, "display": 30},
         headers=_naver_headers(),
         label="NAVER 웹문서",
+        source="NAVER",
     )
 
     seen_domains: set[str] = set()
@@ -350,6 +430,7 @@ async def search_blogs(cert_name: str, stage: str | None) -> list[ResourceItem]:
         params={"query": query, "display": 30, "sort": "sim"},
         headers=_naver_headers(),
         label="NAVER 블로그",
+        source="NAVER",
     )
 
     today = date.today()

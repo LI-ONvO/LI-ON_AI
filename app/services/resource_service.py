@@ -17,7 +17,14 @@ from app.core.exceptions import AIServerError
 from app.core.logging import get_logger
 from app.repositories import resource_sources as sources
 from app.repositories.certifications import get_certification
-from app.schemas.resource import ResourceItem, ResourceRequest, ResourceResponse, ResourceType
+from app.schemas.resource import (
+    ResourceItem,
+    ResourceRequest,
+    ResourceResponse,
+    ResourceType,
+    UnavailableReason,
+    UnavailableSource,
+)
 
 logger = get_logger(__name__)
 
@@ -35,10 +42,28 @@ class ResourceSourcesUnavailable(AIServerError):
     message = "학습 자료 검색에 실패했습니다."
 
 
+class ResourceQuotaExceeded(AIServerError):
+    """모든 출처가 호출 한도에 걸렸다. 서버 장애가 아니라 잠시 뒤 다시 시도하면 된다."""
+
+    status_code = 503
+    code = "RESOURCE_QUOTA_EXCEEDED"
+    message = "학습 자료 검색 한도를 모두 사용했습니다. 잠시 후 다시 시도해 주세요."
+
+
 class CertificateNotFound(AIServerError):
     status_code = 422
     code = "CERTIFICATE_NOT_FOUND"
     message = "자격증 종목코드를 찾지 못했습니다."
+
+
+def _reason(t: ResourceType, error: BaseException) -> UnavailableReason:
+    if isinstance(error, sources.SourceQuotaExceeded):
+        return UnavailableReason.QUOTA_EXCEEDED
+    if isinstance(error, sources.SourceNotConfigured):
+        return UnavailableReason.NOT_CONFIGURED
+    if not isinstance(error, sources.SourceUnavailable):
+        logger.error("자료 검색 중 예상하지 못한 오류 | type=%s", t.value, exc_info=error)
+    return UnavailableReason.ERROR
 
 
 def detect_stage(roadmap_steps: list[str]) -> str | None:
@@ -113,16 +138,16 @@ async def recommend_resources(payload: ResourceRequest) -> ResourceResponse:
 
     excluded = set(payload.exclude_urls)
     by_type: dict[ResourceType, list[ResourceItem]] = {}
-    failed: list[str] = []
+    unavailable: list[UnavailableSource] = []
     for t, result in zip(order, results):
         if isinstance(result, BaseException):
-            if not isinstance(result, sources.SourceUnavailable):
-                logger.exception("자료 검색 중 예상하지 못한 오류 | type=%s", t.value, exc_info=result)
-            failed.append(t.value)
+            unavailable.append(UnavailableSource(type=t, reason=_reason(t, result)))
             continue
         by_type[t] = [item for item in result if item.url not in excluded]
 
-    if order and len(failed) == len(order):
+    if order and len(unavailable) == len(order):
+        if all(u.reason == UnavailableReason.QUOTA_EXCEEDED for u in unavailable):
+            raise ResourceQuotaExceeded()
         raise ResourceSourcesUnavailable()
 
     # 웹·블로그는 링크를 실제로 열어 본다. 한 종류가 최대 size 개까지 쓰일 수 있으니 그만큼만.
@@ -134,6 +159,7 @@ async def recommend_resources(payload: ResourceRequest) -> ResourceResponse:
     logger.info(
         "자료 추천 완료 | userId=%s items=%d %s failed=%s",
         payload.user_id, len(items),
-        {t.value: sum(1 for i in items if i.type == t) for t in order}, failed,
+        {t.value: sum(1 for i in items if i.type == t) for t in order},
+        [f"{u.type.value}:{u.reason.value}" for u in unavailable],
     )
-    return ResourceResponse(items=items)
+    return ResourceResponse(items=items, unavailable=unavailable)

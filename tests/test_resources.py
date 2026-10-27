@@ -20,14 +20,16 @@ def _keys_and_cache(monkeypatch):
     for name in ("youtube_api_key", "kakao_rest_api_key", "naver_client_id", "naver_client_secret"):
         monkeypatch.setattr(settings, name, "test")
     sources._cache.clear()
+    sources._blocked_until.clear()
     yield
     sources._cache.clear()
+    sources._blocked_until.clear()
 
 
 def _fake_get(responses: dict):
     """URL 에 들어 있는 조각으로 가짜 응답을 고른다."""
 
-    async def _get(url, *, params, headers, label):
+    async def _get(url, *, params, headers, label, source):
         for fragment, body in responses.items():
             if fragment in url:
                 return body
