@@ -2,9 +2,10 @@
 
 대응 팀 명세: POST /resources/recommendations
 
-응답의 title/url/reason 은 명세 그대로이고, 나머지는 프론트 요청("줄 수 있는 정보는 다 달라")에
-따라 덧붙였다. 자료 종류마다 API 가 주는 정보가 달라 종류별 객체(video/book/blog)에 담는다.
-해당 종류가 아니면 null 이다.
+응답은 명세 그대로 title/url/reason/expiration_date 만 보낸다(백엔드 요청).
+
+ResourceItem 은 내부용이다. 검색 API 가 준 정보(조회수·출간일·블로거 등)를 담아 거르고 순서를
+정하는 데 쓰고, 응답으로 내보낼 때 ResourceRecommendation 으로 줄인다.
 """
 
 from datetime import date, datetime
@@ -96,18 +97,35 @@ class UnavailableReason(str, Enum):
 
 
 class UnavailableSource(CamelModel):
+    """내부용. 응답에는 넣지 않고 로그와 오류 코드(502/503) 판단에만 쓴다."""
+
     type: ResourceType
     reason: UnavailableReason
 
 
-class ResourceResponse(CamelModel):
-    items: list[ResourceItem] = Field(
-        description="실제 접근 가능한 자료만. 조건에 맞는 자료가 부족하면 size 보다 적을 수 있다."
-    )
-    unavailable: list[UnavailableSource] = Field(
-        default_factory=list,
+class ResourceRecommendation(CamelModel):
+    """응답 항목. 팀 명세의 네 필드만."""
+
+    title: str = Field(description="자료 제목 (API 가 준 그대로)")
+    url: str = Field(description="원본 주소")
+    reason: str = Field(
         description=(
-            "이번에 검색하지 못한 자료 종류와 이유. 비어 있으면 모두 정상. "
-            "items 에 어떤 종류가 없을 때 '검색 결과가 없음'인지 '한도 초과'인지 구분하는 데 쓴다."
+            "출처로 시작하는 한 줄 설명. 예: 'YouTube · 채널 · 53분 · 조회수 12,480회 · 2025-12-04 업로드'. "
+            "출처 표기는 NAVER·카카오 약관 조건이라 앱에서 그대로 보여 준다."
+        )
+    )
+    # 팀 명세의 키 이름이 snake_case 라 다른 응답(camelCase)과 달리 별칭을 직접 준다.
+    # 이름은 date 지만 날짜가 아니라 일수다(팀 명세).
+    expiration_date: int = Field(
+        alias="expiration_date",
+        description=(
+            "받은 뒤 며칠 동안 저장해 두고 다시 써도 되는지(일). 지나면 지우거나 다시 받는다. "
+            "지금은 모두 7. 각 API 약관 상한(YouTube 30일, NAVER 21일, 카카오 임시 캐시)보다 짧다."
         ),
+    )
+
+
+class ResourceResponse(CamelModel):
+    items: list[ResourceRecommendation] = Field(
+        description="실제 접근 가능한 자료만. 조건에 맞는 자료가 부족하면 size 보다 적을 수 있다."
     )

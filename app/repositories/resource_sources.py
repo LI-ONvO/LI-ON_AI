@@ -249,7 +249,7 @@ async def search_videos(cert_name: str, stage: str | None) -> list[ResourceItem]
 
         views = _to_int(stats.get("viewCount"))
         channel = snippet.get("channelTitle")
-        parts = [channel, _format_duration(seconds)]
+        parts = ["YouTube", channel, _format_duration(seconds)]
         if views is not None:
             parts.append(f"조회수 {views:,}회")
         parts.append(f"{published:%Y-%m-%d} 업로드")
@@ -325,7 +325,7 @@ async def search_books(cert_name: str) -> list[ResourceItem]:
         sale = _to_int(doc.get("sale_price"))
         publisher = doc.get("publisher") or None
 
-        parts = [publisher]
+        parts = ["다음 책", publisher]
         if edition_year:
             parts.append(f"{edition_year}년 판")
         if published:
@@ -411,7 +411,7 @@ async def search_web(cert_name: str) -> list[ResourceItem]:
             type=ResourceType.WEB,
             title=title,
             url=url,
-            reason=f"{domain} · 공식 기관" if is_trusted else domain,
+            reason=f"NAVER 웹문서 · {domain}" + (" · 공식 기관" if is_trusted else ""),
             description=_plain(it.get("description")) or None,
             source="NAVER 웹문서",
         )

@@ -90,8 +90,8 @@ def test_other_youtube_403_is_not_treated_as_quota(monkeypatch):
     assert "YOUTUBE" not in sources._blocked_until
 
 
-def test_response_reports_unavailable_types(client, monkeypatch):
-    """앱이 '결과 없음'과 '한도 초과'를 구분할 수 있게 이유를 알려 준다."""
+def test_quota_on_some_sources_still_returns_the_rest(client, monkeypatch):
+    """한도가 찬 종류만 빠지고 나머지로 응답한다."""
     _patch_sources(
         monkeypatch,
         search_videos=AsyncMock(side_effect=sources.SourceQuotaExceeded("YOUTUBE")),
@@ -101,10 +101,7 @@ def test_response_reports_unavailable_types(client, monkeypatch):
     res = client.post("/resources/recommendations", json=PAYLOAD)
 
     assert res.status_code == 200
-    assert res.json()["unavailable"] == [
-        {"type": "VIDEO", "reason": "QUOTA_EXCEEDED"},
-        {"type": "BLOG", "reason": "NOT_CONFIGURED"},
-    ]
+    assert [i["title"] for i in res.json()["items"]] == ["BOOK0", "WEB0"]
 
 
 def test_all_quota_exceeded_maps_to_503(client, monkeypatch):

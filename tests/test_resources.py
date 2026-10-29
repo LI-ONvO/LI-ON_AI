@@ -1,6 +1,7 @@
 """학습 자료 추천 테스트. 외부 검색 API 는 전부 가짜 응답으로 바꾼다."""
 
 import asyncio
+import time
 from datetime import date, timedelta
 from unittest.mock import AsyncMock
 
@@ -175,10 +176,10 @@ def test_endpoint_mixes_types_and_excludes_seen_urls(client, monkeypatch):
 
     assert res.status_code == 200
     items = res.json()["items"]
-    assert [i["type"] for i in items] == ["VIDEO", "BOOK", "WEB", "BLOG"]
-    assert "https://x/VIDEO/0" not in [i["url"] for i in items]
-    # 명세 필드와 추가 필드가 camelCase 로 나간다.
-    assert {"title", "url", "reason", "thumbnailUrl", "publishedAt", "video", "book", "blog"} <= set(items[0])
+    # 가짜 자료의 제목은 "종류+번호"다. 종류를 번갈아 담고, 이미 본 VIDEO0 은 뺀다.
+    assert [i["title"] for i in items] == ["VIDEO1", "BOOK0", "WEB0", "BLOG0"]
+    # 명세의 네 필드만 보낸다(백엔드 요청).
+    assert all(set(i) == {"title", "url", "reason", "expiration_date"} for i in items)
     mocks["search_videos"].assert_awaited_once_with(CERT, "필기")
 
 
@@ -188,7 +189,7 @@ def test_one_source_failing_does_not_fail_request(client, monkeypatch):
     res = client.post("/resources/recommendations", json=PAYLOAD)
 
     assert res.status_code == 200
-    assert "VIDEO" not in [i["type"] for i in res.json()["items"]]
+    assert not any(i["title"].startswith("VIDEO") for i in res.json()["items"])
 
 
 def test_all_sources_failing_maps_to_502(client, monkeypatch):
@@ -216,4 +217,15 @@ def test_types_filter(client, monkeypatch):
 
     res = client.post("/resources/recommendations", json={**PAYLOAD, "types": ["BOOK"]})
 
-    assert {i["type"] for i in res.json()["items"]} == {"BOOK"}
+    assert all(i["title"].startswith("BOOK") for i in res.json()["items"])
+
+
+# ------------------------------------------------------------ 보관 기한
+
+def test_expiration_is_days_until_expiry(client, monkeypatch):
+    """expiration_date 는 날짜가 아니라 며칠 뒤 만료되는지(일)다. 키 이름은 명세대로 snake_case."""
+    _patch_sources(monkeypatch)
+
+    items = client.post("/resources/recommendations", json=PAYLOAD).json()["items"]
+
+    assert {i["expiration_date"] for i in items} == {7}

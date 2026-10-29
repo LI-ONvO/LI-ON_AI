@@ -19,6 +19,7 @@ from app.repositories import resource_sources as sources
 from app.repositories.certifications import get_certification
 from app.schemas.resource import (
     ResourceItem,
+    ResourceRecommendation,
     ResourceRequest,
     ResourceResponse,
     ResourceType,
@@ -64,6 +65,11 @@ def _reason(t: ResourceType, error: BaseException) -> UnavailableReason:
     if not isinstance(error, sources.SourceUnavailable):
         logger.error("자료 검색 중 예상하지 못한 오류 | type=%s", t.value, exc_info=error)
     return UnavailableReason.ERROR
+
+
+# 응답의 expiration_date: 백엔드가 받은 뒤 며칠 동안 저장해 두고 다시 써도 되는지(팀 명세).
+# 각 API 약관의 저장 상한(YouTube 30일, NAVER 21일, 카카오 임시 캐시)보다 짧게 모두 7일로 둔다.
+EXPIRATION_DAYS = 7
 
 
 def detect_stage(roadmap_steps: list[str]) -> str | None:
@@ -155,11 +161,14 @@ async def recommend_resources(payload: ResourceRequest) -> ResourceResponse:
         if by_type.get(t):
             by_type[t] = await _drop_unreachable(by_type[t], payload.size)
 
-    items = interleave(by_type, order, payload.size)
+    picked = interleave(by_type, order, payload.size)
     logger.info(
         "자료 추천 완료 | userId=%s items=%d %s failed=%s",
-        payload.user_id, len(items),
-        {t.value: sum(1 for i in items if i.type == t) for t in order},
+        payload.user_id, len(picked),
+        {t.value: sum(1 for i in picked if i.type == t) for t in order},
         [f"{u.type.value}:{u.reason.value}" for u in unavailable],
     )
-    return ResourceResponse(items=items, unavailable=unavailable)
+    return ResourceResponse(items=[
+        ResourceRecommendation(title=i.title, url=i.url, reason=i.reason, expiration_date=EXPIRATION_DAYS)
+        for i in picked
+    ])
