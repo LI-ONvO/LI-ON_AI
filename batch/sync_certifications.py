@@ -64,6 +64,8 @@ THROTTLE_BACKOFF_SECONDS = 3
 SERIES_CODES = ("01", "02", "03", "04")
 
 CERT_FIELDS = ["jm_cd", "jm_nm", "qual_gb_cd", "series_nm"]
+# 종목명 자리에 들어 있는 관리용 표시. 실제 종목이 아니라 적재하지 않는다.
+PLACEHOLDER_NAMES = {"삭제필요"}
 
 DETAIL_FIELDS = ["jm_cd", "mdoblig_fld_nm", "career", "job", "summary", "trend", "hist"]
 
@@ -212,6 +214,10 @@ def fetch_certifications() -> list[dict]:
             )
             items = list(root.iter("jmInfo"))
             for item in items:
+                # 원본에 종목명 대신 관리용 표시가 들어간 항목이 있다(일학습병행 25V2 "삭제필요").
+                # 실제 종목이 아니라 앱 검색에 그대로 뜨므로 넣지 않는다.
+                if (_text(item, "jmNm") or "").strip() in PLACEHOLDER_NAMES:
+                    continue
                 # W/C는 계열 구분이 없다. 일정도 자격구분 단위로만 나뉜다.
                 rows.append(_row(
                     CERT_FIELDS,
